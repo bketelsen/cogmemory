@@ -82,3 +82,12 @@ The service expects:
 - `XDG_CONFIG_HOME`: used by the default config path when set
 - `STATE_HOME`: used for the default socket path when `socket_path` is omitted
 - `NOTIFY_SOCKET`: set by systemd for readiness/watchdog notifications
+
+## Attribution
+
+The memory conventions, tier architecture (hot/warm/glacier), L0/L1/L2 retrieval protocol,
+pipeline skills (reflect, housekeeping, foresight, evolve), and observation format implemented
+by this service are based on **[Cog](https://github.com/marciopuga/cog)** by
+[Marcio Puga](https://github.com/marciopuga) — a plain-text cognitive architecture for
+AI agents. Cog defines the rules; this service provides the concurrent-safe filesystem
+daemon that enforces them across multiple agents sharing a single memory tree.
