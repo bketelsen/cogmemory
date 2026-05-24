@@ -1,0 +1,28 @@
+[Unit]
+Description=Cog Memory Service
+Documentation=https://github.com/bketelsen/cogmemory
+After=network.target
+
+[Service]
+Type=notify
+ExecStart=%h/.local/bin/cogmemory --config %h/.config/cogmemory/config.yml
+Restart=on-failure
+RestartSec=5
+WatchdogSec=30
+NotifyAccess=main
+
+# Environment file for COGMEMORY_* and other settings
+EnvironmentFile=-%h/.config/cogmemory/.env
+
+[Install]
+WantedBy=default.target
+
+# Installation:
+#   systemctl --user enable --now cogmemory
+#
+# Build and install first:
+#   make install-versioned
+#
+# Note: The service removes any stale socket file on startup.
+# If the service crashes with a socket file present, the next start
+# will automatically clean it up.
