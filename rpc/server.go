@@ -128,6 +128,10 @@ func (srv *Server) dispatch(line []byte) Response {
 		return srv.handleAppend(req)
 	case "patch":
 		return srv.handlePatch(req)
+	case "outline":
+		return srv.handleOutline(req)
+	case "move":
+		return srv.handleMove(req)
 	case "search":
 		return srv.handleSearch(req)
 	case "stats":
@@ -138,6 +142,8 @@ func (srv *Server) dispatch(line []byte) Response {
 		return srv.handleList(req)
 	case "health":
 		return srv.handleHealth(req)
+	case "git":
+		return srv.handleGit(req)
 	default:
 		return errorResponse(req.ID, CodeMethodNotFound, fmt.Sprintf("method not found: %q", req.Method))
 	}

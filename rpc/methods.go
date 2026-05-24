@@ -14,7 +14,10 @@ type baseParams struct {
 
 type readParams struct {
 	baseParams
-	Path string `json:"path"`
+	Path    string `json:"path"`
+	Section string `json:"section,omitempty"`
+	Start   int    `json:"start,omitempty"`
+	End     int    `json:"end,omitempty"`
 }
 
 func (srv *Server) handleRead(req Request) Response {
@@ -31,7 +34,7 @@ func (srv *Server) handleRead(req Request) Response {
 			return errorResponse(req.ID, CodeRBACDenied, fmt.Sprintf("read denied for role %q on %q", p.Role, p.Path))
 		}
 	}
-	content, err := srv.store.Read(p.Path)
+	content, err := srv.store.Read(p.Path, p.Section, p.Start, p.End)
 	if err != nil {
 		return errorResponse(req.ID, CodeStoreError, "read: "+err.Error())
 	}
@@ -123,6 +126,63 @@ func (srv *Server) handlePatch(req Request) Response {
 	})
 }
 
+// --- outline ---
+
+type outlineParams struct {
+	baseParams
+	Path string `json:"path"`
+}
+
+func (srv *Server) handleOutline(req Request) Response {
+	var p outlineParams
+	if err := json.Unmarshal(req.Params, &p); err != nil {
+		return errorResponse(req.ID, CodeInvalidParams, "outline: invalid params: "+err.Error())
+	}
+	if p.Path == "" {
+		return errorResponse(req.ID, CodeInvalidParams, "outline: path is required")
+	}
+	if !srv.rbac.Check(p.Role, p.Path, "read") {
+		return errorResponse(req.ID, CodeRBACDenied, fmt.Sprintf("outline denied for role %q on %q", p.Role, p.Path))
+	}
+	entries, err := srv.store.Outline(p.Path)
+	if err != nil {
+		return errorResponse(req.ID, CodeStoreError, "outline: "+err.Error())
+	}
+	return okResponse(req.ID, map[string]interface{}{
+		"entries": entries,
+	})
+}
+
+// --- move ---
+
+type moveParams struct {
+	baseParams
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+func (srv *Server) handleMove(req Request) Response {
+	var p moveParams
+	if err := json.Unmarshal(req.Params, &p); err != nil {
+		return errorResponse(req.ID, CodeInvalidParams, "move: invalid params: "+err.Error())
+	}
+	if p.From == "" {
+		return errorResponse(req.ID, CodeInvalidParams, "move: from is required")
+	}
+	if p.To == "" {
+		return errorResponse(req.ID, CodeInvalidParams, "move: to is required")
+	}
+	if !srv.rbac.Check(p.Role, p.To, "write") {
+		return errorResponse(req.ID, CodeRBACDenied, fmt.Sprintf("move denied for role %q on %q", p.Role, p.To))
+	}
+	if err := srv.store.Move(p.From, p.To); err != nil {
+		return errorResponse(req.ID, CodeStoreError, "move: "+err.Error())
+	}
+	return okResponse(req.ID, map[string]interface{}{
+		"ok": true,
+	})
+}
+
 // --- search ---
 
 type searchParams struct {
@@ -175,6 +235,7 @@ func (srv *Server) handleStats(req Request) Response {
 
 type l0indexParams struct {
 	baseParams
+	Domain string `json:"domain"`
 }
 
 func (srv *Server) handleL0Index(req Request) Response {
@@ -182,7 +243,7 @@ func (srv *Server) handleL0Index(req Request) Response {
 	if req.Params != nil {
 		json.Unmarshal(req.Params, &p) //nolint:errcheck
 	}
-	index, err := srv.store.L0Index()
+	index, err := srv.store.L0Index(p.Domain)
 	if err != nil {
 		return errorResponse(req.ID, CodeStoreError, "l0index: "+err.Error())
 	}
@@ -216,5 +277,36 @@ func (srv *Server) handleList(req Request) Response {
 func (srv *Server) handleHealth(req Request) Response {
 	return okResponse(req.ID, map[string]interface{}{
 		"ok": true,
+	})
+}
+
+// --- git ---
+
+type gitParams struct {
+	baseParams
+	Op      string   `json:"op"`
+	Ref     string   `json:"ref,omitempty"`
+	Message string   `json:"message,omitempty"`
+	Paths   []string `json:"paths,omitempty"`
+	Limit   int      `json:"limit,omitempty"`
+}
+
+func (srv *Server) handleGit(req Request) Response {
+	var p gitParams
+	if err := json.Unmarshal(req.Params, &p); err != nil {
+		return errorResponse(req.ID, CodeInvalidParams, "git: invalid params: "+err.Error())
+	}
+	if p.Op == "" {
+		return errorResponse(req.ID, CodeInvalidParams, "git: op is required")
+	}
+	if p.Op == "commit" && !srv.rbac.Check(p.Role, "**", "write") {
+		return errorResponse(req.ID, CodeRBACDenied, fmt.Sprintf("git commit denied for role %q", p.Role))
+	}
+	output, err := srv.store.Git(p.Op, p.Ref, p.Message, p.Paths, p.Limit)
+	if err != nil {
+		return errorResponse(req.ID, CodeStoreError, "git: "+err.Error())
+	}
+	return okResponse(req.ID, map[string]interface{}{
+		"output": output,
 	})
 }

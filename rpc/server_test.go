@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -20,6 +21,7 @@ import (
 type testServer struct {
 	srv        *rpc.Server
 	socketPath string
+	memoryRoot string
 	ln         net.Listener
 	done       chan struct{}
 }
@@ -27,7 +29,8 @@ type testServer struct {
 func newTestServer(t *testing.T) *testServer {
 	t.Helper()
 	dir := t.TempDir()
-	s, err := store.New(filepath.Join(dir, "memory"))
+	memoryRoot := filepath.Join(dir, "memory")
+	s, err := store.New(memoryRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +72,7 @@ func newTestServer(t *testing.T) *testServer {
 		os.Remove(socketPath)
 	})
 
-	return &testServer{srv: srv, socketPath: socketPath, ln: ln, done: done}
+	return &testServer{srv: srv, socketPath: socketPath, memoryRoot: memoryRoot, ln: ln, done: done}
 }
 
 type rpcRequest struct {
@@ -236,6 +239,96 @@ func TestAppendObsEnforcementViaRPC(t *testing.T) {
 	}
 }
 
+func TestOutlineMethod(t *testing.T) {
+	ts := newTestServer(t)
+	call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 1, Method: "write",
+		Params: map[string]interface{}{
+			"role": "siona",
+			"path": "doc.md",
+			"content": strings.Join([]string{
+				"# ignored",
+				"## First",
+				"text",
+				"### Nested",
+				"## Second",
+			}, "\n"),
+		},
+	})
+
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 2, Method: "outline",
+		Params: map[string]interface{}{"role": "siona", "path": "doc.md"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("outline error: %v", resp.Error.Message)
+	}
+
+	var result struct {
+		Entries []struct {
+			Line  int    `json:"line"`
+			Text  string `json:"text"`
+			Level int    `json:"level"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("unmarshal outline result: %v", err)
+	}
+	want := []struct {
+		Line  int    `json:"line"`
+		Text  string `json:"text"`
+		Level int    `json:"level"`
+	}{
+		{Line: 2, Text: "First", Level: 2},
+		{Line: 4, Text: "Nested", Level: 3},
+		{Line: 5, Text: "Second", Level: 2},
+	}
+	if fmt.Sprint(result.Entries) != fmt.Sprint(want) {
+		t.Fatalf("entries = %+v, want %+v", result.Entries, want)
+	}
+}
+
+func TestMoveMethod(t *testing.T) {
+	ts := newTestServer(t)
+	call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 1, Method: "write",
+		Params: map[string]interface{}{"role": "siona", "path": "old.md", "content": "content\n"},
+	})
+
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 2, Method: "move",
+		Params: map[string]interface{}{"role": "siona", "from": "old.md", "to": "archive/new.md"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("move error: %v", resp.Error.Message)
+	}
+	if _, err := os.Stat(filepath.Join(ts.memoryRoot, "old.md")); !os.IsNotExist(err) {
+		t.Fatalf("old path still exists or stat failed unexpectedly: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(ts.memoryRoot, "archive/new.md")); err != nil {
+		t.Fatalf("new path missing: %v", err)
+	}
+}
+
+func TestMoveMethodChecksWriteAccessOnDestination(t *testing.T) {
+	ts := newTestServer(t)
+	call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 1, Method: "write",
+		Params: map[string]interface{}{"role": "siona", "path": "notes.md", "content": "content\n"},
+	})
+
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 2, Method: "move",
+		Params: map[string]interface{}{"role": "coder", "from": "notes.md", "to": "private/notes.md"},
+	})
+	if resp.Error == nil {
+		t.Fatal("expected RBAC error")
+	}
+	if resp.Error.Code != -32000 {
+		t.Errorf("error code = %d, want -32000", resp.Error.Code)
+	}
+}
+
 func TestHealthMethod(t *testing.T) {
 	ts := newTestServer(t)
 
@@ -253,6 +346,55 @@ func TestHealthMethod(t *testing.T) {
 	json.Unmarshal(resp.Result, &result)
 	if result["ok"] != true {
 		t.Errorf("health result = %v, want {ok: true}", result)
+	}
+}
+
+func TestGitStatusMethodAllowsReadOnlyRole(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	ts := newTestServer(t)
+	cmd := exec.Command("git", "init")
+	cmd.Dir = ts.memoryRoot
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0",
+		ID:      1,
+		Method:  "git",
+		Params:  map[string]interface{}{"role": "researcher", "op": "status"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("git status error: %v", resp.Error.Message)
+	}
+
+	var result map[string]interface{}
+	json.Unmarshal(resp.Result, &result)
+	if result["output"] != "" {
+		t.Errorf("git status output = %v, want empty string", result["output"])
+	}
+}
+
+func TestGitCommitMethodRequiresWriteAccess(t *testing.T) {
+	ts := newTestServer(t)
+
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0",
+		ID:      1,
+		Method:  "git",
+		Params: map[string]interface{}{
+			"role":    "researcher",
+			"op":      "commit",
+			"message": "test commit",
+		},
+	})
+	if resp.Error == nil {
+		t.Fatal("expected RBAC error for git commit")
+	}
+	if resp.Error.Code != -32000 {
+		t.Errorf("error code = %d, want -32000", resp.Error.Code)
 	}
 }
 
