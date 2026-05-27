@@ -592,7 +592,7 @@ func TestStats(t *testing.T) {
 	writeFile(t, dir, "a.md", "line1\nline2\n")
 	writeFile(t, dir, "b.md", "only one line")
 
-	stats, err := s.Stats()
+	stats, err := s.Stats("")
 	if err != nil {
 		t.Fatalf("Stats: %v", err)
 	}
@@ -604,6 +604,101 @@ func TestStats(t *testing.T) {
 	}
 	if stats.Size <= 0 {
 		t.Error("Size should be > 0")
+	}
+	if len(stats.PerFile) != 2 {
+		t.Fatalf("PerFile = %d, want 2", len(stats.PerFile))
+	}
+	// Sorted by path: a.md, b.md
+	if stats.PerFile[0].Path != "a.md" {
+		t.Errorf("PerFile[0].Path = %q, want a.md", stats.PerFile[0].Path)
+	}
+	if stats.PerFile[0].Lines != 2 {
+		t.Errorf("PerFile[0].Lines = %d, want 2", stats.PerFile[0].Lines)
+	}
+	if stats.PerFile[1].Path != "b.md" {
+		t.Errorf("PerFile[1].Path = %q, want b.md", stats.PerFile[1].Path)
+	}
+	if stats.PerFile[1].Lines != 1 {
+		t.Errorf("PerFile[1].Lines = %d, want 1", stats.PerFile[1].Lines)
+	}
+	if stats.PerFile[0].Modified == "" {
+		t.Error("PerFile[0].Modified should not be empty")
+	}
+	// Per-file totals should sum to overall totals.
+	var sumLines, sumSize int64
+	for _, f := range stats.PerFile {
+		sumLines += f.Lines
+		sumSize += f.Size
+	}
+	if sumLines != stats.Lines {
+		t.Errorf("sum of PerFile.Lines = %d, want %d", sumLines, stats.Lines)
+	}
+	if sumSize != stats.Size {
+		t.Errorf("sum of PerFile.Size = %d, want %d", sumSize, stats.Size)
+	}
+}
+
+func TestStatsPrefix(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := store.New(dir)
+	writeFile(t, dir, "projects/a.md", "line1\nline2\n")
+	writeFile(t, dir, "projects/sub/b.md", "alpha\nbeta\ngamma\n")
+	writeFile(t, dir, "personal/c.md", "ignored\n")
+	writeFile(t, dir, "root.md", "ignored too\n")
+
+	stats, err := s.Stats("projects")
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if stats.Files != 2 {
+		t.Errorf("Files = %d, want 2 (projects/* only)", stats.Files)
+	}
+	if len(stats.PerFile) != 2 {
+		t.Fatalf("PerFile = %d, want 2", len(stats.PerFile))
+	}
+	for _, f := range stats.PerFile {
+		if !strings.HasPrefix(f.Path, "projects/") {
+			t.Errorf("PerFile.Path = %q, expected projects/ prefix", f.Path)
+		}
+	}
+
+	// Trailing slash should be tolerated.
+	statsSlash, err := s.Stats("projects/")
+	if err != nil {
+		t.Fatalf("Stats(projects/): %v", err)
+	}
+	if statsSlash.Files != stats.Files {
+		t.Errorf("trailing slash should match: Files = %d, want %d", statsSlash.Files, stats.Files)
+	}
+
+	// Non-matching prefix returns zero, with non-nil empty PerFile slice.
+	empty, err := s.Stats("nonexistent")
+	if err != nil {
+		t.Fatalf("Stats(nonexistent): %v", err)
+	}
+	if empty.Files != 0 || empty.Lines != 0 || empty.Size != 0 {
+		t.Errorf("nonexistent prefix should produce zero totals, got %+v", empty)
+	}
+	if empty.PerFile == nil {
+		t.Error("PerFile should be non-nil empty slice for JSON consistency")
+	}
+
+	// Exact-file prefix matches just that file.
+	one, err := s.Stats("projects/a.md")
+	if err != nil {
+		t.Fatalf("Stats(projects/a.md): %v", err)
+	}
+	if one.Files != 1 {
+		t.Errorf("exact file prefix: Files = %d, want 1", one.Files)
+	}
+
+	// Prefix must not match by partial directory name (projects vs project).
+	none, err := s.Stats("project")
+	if err != nil {
+		t.Fatalf("Stats(project): %v", err)
+	}
+	if none.Files != 0 {
+		t.Errorf("partial-name prefix should not match: Files = %d, want 0", none.Files)
 	}
 }
 

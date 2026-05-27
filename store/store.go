@@ -10,8 +10,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -27,6 +29,7 @@ type scannedFile struct {
 	relPath string
 	absPath string
 	size    int64
+	modTime time.Time
 }
 
 // SearchResult holds a single search match.
@@ -43,11 +46,20 @@ type OutlineEntry struct {
 	Level int    `json:"level"`
 }
 
+// FileStats holds per-file statistics for a single memory file.
+type FileStats struct {
+	Path     string `json:"path"`
+	Lines    int64  `json:"lines"`
+	Size     int64  `json:"size"`
+	Modified string `json:"modified"` // RFC3339 timestamp
+}
+
 // StatsResult holds filesystem statistics over the memory root.
 type StatsResult struct {
-	Files int   `json:"files"`
-	Lines int64 `json:"lines"`
-	Size  int64 `json:"size"`
+	Files   int         `json:"files"`
+	Lines   int64       `json:"lines"`
+	Size    int64       `json:"size"`
+	PerFile []FileStats `json:"per_file"`
 }
 
 // MemoryStore provides file-based memory operations rooted at a directory.
@@ -416,7 +428,7 @@ func (s *MemoryStore) scanFiles() ([]scannedFile, error) {
 			return nil
 		}
 		relPath, _ := filepath.Rel(s.root, path)
-		files = append(files, scannedFile{relPath: relPath, absPath: path, size: info.Size()})
+		files = append(files, scannedFile{relPath: relPath, absPath: path, size: info.Size(), modTime: info.ModTime()})
 		return nil
 	})
 	if err != nil {
@@ -466,8 +478,12 @@ func (s *MemoryStore) Search(query string) ([]SearchResult, error) {
 	return results, nil
 }
 
-// Stats returns file count, total line count, and total size.
-func (s *MemoryStore) Stats() (StatsResult, error) {
+// Stats returns file count, total line count, total size, and per-file
+// breakdown. If prefix is non-empty, only files whose relative path begins with
+// prefix (after normalizing trailing slashes) are included; totals reflect only
+// the matched subset. Per-file entries are sorted by path for deterministic
+// output.
+func (s *MemoryStore) Stats(prefix string) (StatsResult, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -476,19 +492,44 @@ func (s *MemoryStore) Stats() (StatsResult, error) {
 		return StatsResult{}, fmt.Errorf("store: stats: %w", err)
 	}
 
+	// Normalize prefix: strip leading/trailing slashes for forgiving matching.
+	prefix = strings.Trim(prefix, "/")
+
 	var result StatsResult
 	for _, sf := range files {
+		if prefix != "" {
+			// Match against the file's path or any of its parent dirs.
+			if sf.relPath != prefix &&
+				!strings.HasPrefix(sf.relPath, prefix+"/") {
+				continue
+			}
+		}
 		result.Files++
 		result.Size += sf.size
 
-		data, err := os.ReadFile(sf.absPath)
-		if err != nil {
+		data, readErr := os.ReadFile(sf.absPath)
+		if readErr != nil {
 			continue
 		}
-		result.Lines += int64(strings.Count(string(data), "\n"))
+		lines := int64(strings.Count(string(data), "\n"))
 		if len(data) > 0 && data[len(data)-1] != '\n' {
-			result.Lines++
+			lines++
 		}
+		result.Lines += lines
+
+		result.PerFile = append(result.PerFile, FileStats{
+			Path:     sf.relPath,
+			Lines:    lines,
+			Size:     sf.size,
+			Modified: sf.modTime.UTC().Format(time.RFC3339),
+		})
+	}
+	sort.Slice(result.PerFile, func(i, j int) bool {
+		return result.PerFile[i].Path < result.PerFile[j].Path
+	})
+	// Ensure non-nil JSON output even when empty.
+	if result.PerFile == nil {
+		result.PerFile = []FileStats{}
 	}
 	return result, nil
 }

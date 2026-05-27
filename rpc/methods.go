@@ -216,6 +216,7 @@ func (srv *Server) handleSearch(req Request) Response {
 
 type statsParams struct {
 	baseParams
+	Prefix string `json:"prefix"`
 }
 
 func (srv *Server) handleStats(req Request) Response {
@@ -224,7 +225,7 @@ func (srv *Server) handleStats(req Request) Response {
 		json.Unmarshal(req.Params, &p) //nolint:errcheck
 	}
 	// Stats is available to any authenticated role
-	stats, err := srv.store.Stats()
+	stats, err := srv.store.Stats(p.Prefix)
 	if err != nil {
 		return errorResponse(req.ID, CodeStoreError, "stats: "+err.Error())
 	}
