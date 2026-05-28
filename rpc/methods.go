@@ -75,8 +75,9 @@ func (srv *Server) handleWrite(req Request) Response {
 
 type appendParams struct {
 	baseParams
-	Path string `json:"path"`
-	Text string `json:"text"`
+	Path    string `json:"path"`
+	Text    string `json:"text"`
+	Section string `json:"section,omitempty"`
 }
 
 func (srv *Server) handleAppend(req Request) Response {
@@ -90,7 +91,7 @@ func (srv *Server) handleAppend(req Request) Response {
 	if !srv.rbac.Check(p.Role, p.Path, "write") {
 		return errorResponse(req.ID, CodeRBACDenied, fmt.Sprintf("append denied for role %q on %q", p.Role, p.Path))
 	}
-	if err := srv.store.Append(p.Path, p.Text); err != nil {
+	if err := srv.store.AppendSection(p.Path, p.Section, p.Text); err != nil {
 		return errorResponse(req.ID, CodeStoreError, "append: "+err.Error())
 	}
 	return okResponse(req.ID, map[string]interface{}{

@@ -385,6 +385,76 @@ func TestAppendNonObsPathNotValidated(t *testing.T) {
 
 // --- Patch ---
 
+func TestAppendSectionUnderHeading(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := store.New(dir)
+	writeFile(t, dir, "ai.md", "# Title\n\n## Open\n- existing\n\n## Completed\n- done\n")
+
+	if err := s.AppendSection("ai.md", "## Open", "- new item"); err != nil {
+		t.Fatalf("AppendSection: %v", err)
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "ai.md"))
+	want := "# Title\n\n## Open\n- existing\n- new item\n\n## Completed\n- done\n"
+	if string(data) != want {
+		t.Errorf("got:\n%s\nwant:\n%s", data, want)
+	}
+}
+
+func TestAppendSectionAcceptsBareTitle(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := store.New(dir)
+	writeFile(t, dir, "ai.md", "## Open\n- existing\n\n## Completed\n- done\n")
+	if err := s.AppendSection("ai.md", "Open", "- new"); err != nil {
+		t.Fatalf("AppendSection: %v", err)
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "ai.md"))
+	if !strings.Contains(string(data), "- existing\n- new\n\n## Completed") {
+		t.Errorf("section not targeted correctly:\n%s", data)
+	}
+}
+
+func TestAppendSectionMissingHeading(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := store.New(dir)
+	writeFile(t, dir, "ai.md", "## Open\n- existing\n")
+	err := s.AppendSection("ai.md", "## Nonexistent", "- x")
+	if err == nil {
+		t.Fatal("expected error for missing heading")
+	}
+	if !strings.Contains(err.Error(), "heading not found") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestAppendSectionEmptyEqualsAppend(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := store.New(dir)
+	writeFile(t, dir, "log.md", "line1\n")
+	if err := s.AppendSection("log.md", "", "line2\n"); err != nil {
+		t.Fatalf("AppendSection: %v", err)
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "log.md"))
+	if string(data) != "line1\nline2\n" {
+		t.Errorf("got %q", data)
+	}
+}
+
+func TestAppendSectionStopsAtSameLevelHeading(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := store.New(dir)
+	writeFile(t, dir, "ai.md", "## Open\n- a\n### Sub\n- b\n## Next\n- c\n")
+	if err := s.AppendSection("ai.md", "## Open", "- new"); err != nil {
+		t.Fatalf("AppendSection: %v", err)
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "ai.md"))
+	want := "## Open\n- a\n### Sub\n- b\n- new\n\n## Next\n- c\n"
+	if string(data) != want {
+		t.Errorf("got:\n%q\nwant:\n%q", data, want)
+	}
+}
+
+// --- Patch ---
+
 func TestPatch(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := store.New(dir)

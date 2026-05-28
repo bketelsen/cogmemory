@@ -226,6 +226,22 @@ func (s *MemoryStore) Write(relPath, content string) error {
 // For paths ending in "observations.md", each non-blank line must match
 // the observation format "- YYYY-MM-DD [tags]: text".
 func (s *MemoryStore) Append(relPath, text string) error {
+	return s.AppendSection(relPath, "", text)
+}
+
+// AppendSection adds text to a file, optionally targeting a markdown
+// section heading. When section is non-empty, text is inserted at the end
+// of the named section (before the next heading at the same-or-shallower
+// level, or EOF). The section argument matches a markdown heading line
+// such as "## Open" or just "Open" (any "#"-prefix level is accepted).
+// Returns an error if the section is not found in an existing file —
+// callers must create the heading first rather than silently land
+// content at EOF (which historically dropped items under unintended
+// trailing sections like "## Completed").
+//
+// When section is empty, behavior is identical to Append at EOF.
+// When the file does not exist and section is non-empty, returns an error.
+func (s *MemoryStore) AppendSection(relPath, section, text string) error {
 	abs, err := s.absPath(relPath)
 	if err != nil {
 		return err
@@ -239,6 +255,11 @@ func (s *MemoryStore) Append(relPath, text string) error {
 
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		return fmt.Errorf("store: mkdir %q: %w", relPath, err)
+	}
+
+	// Section-targeted append: full read, locate heading, rewrite atomically.
+	if section != "" {
+		return s.appendUnderSection(abs, relPath, section, text)
 	}
 
 	f, err := os.OpenFile(abs, os.O_RDWR|os.O_CREATE, 0o644)
@@ -296,6 +317,107 @@ func (s *MemoryStore) Append(relPath, text string) error {
 		return fmt.Errorf("store: read %q: %w", relPath, err)
 	}
 	newContent := string(existing) + separator + text + trailing
+	return atomicWrite(abs, newContent)
+}
+
+// headingRE matches a markdown ATX heading line and captures the level
+// (count of leading '#') and the heading text.
+var headingRE = regexp.MustCompile(`^(#{1,6})\s+(.+?)\s*$`)
+
+// appendUnderSection reads the file, locates a heading whose text (or
+// full "## Text" form) matches section, and inserts text at the end of
+// that section — immediately before the next heading at the same or
+// shallower level, or EOF. Atomic rewrite under exclusive lock.
+func (s *MemoryStore) appendUnderSection(abs, relPath, section, text string) error {
+	f, err := os.OpenFile(abs, os.O_RDWR, 0o644)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("store: append section %q: file %q does not exist (create it first)", section, relPath)
+		}
+		return fmt.Errorf("store: open %q: %w", relPath, err)
+	}
+	defer f.Close()
+
+	if err := lockExclusive(f); err != nil {
+		return fmt.Errorf("store: lock %q: %w", relPath, err)
+	}
+	defer unlock(f)
+
+	existing, err := io.ReadAll(f)
+	if err != nil {
+		return fmt.Errorf("store: read %q: %w", relPath, err)
+	}
+
+	// Normalize the requested section: strip leading '#' and whitespace.
+	wantTitle := strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(section), "#"))
+	if wantTitle == "" {
+		return fmt.Errorf("store: append section: empty section name")
+	}
+
+	lines := strings.Split(string(existing), "\n")
+	startIdx := -1
+	startLevel := 0
+	for i, ln := range lines {
+		m := headingRE.FindStringSubmatch(ln)
+		if m == nil {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(m[2]), wantTitle) {
+			startIdx = i
+			startLevel = len(m[1])
+			break
+		}
+	}
+	if startIdx < 0 {
+		return fmt.Errorf("store: append section %q: heading not found in %q", section, relPath)
+	}
+
+	// Find end of section: first heading at level <= startLevel after startIdx.
+	endIdx := len(lines)
+	for j := startIdx + 1; j < len(lines); j++ {
+		m := headingRE.FindStringSubmatch(lines[j])
+		if m == nil {
+			continue
+		}
+		if len(m[1]) <= startLevel {
+			endIdx = j
+			break
+		}
+	}
+
+	// Trim trailing blank lines inside the section so insertion doesn't
+	// drift further and further from the heading on repeated appends.
+	insertAt := endIdx
+	for insertAt > startIdx+1 && strings.TrimSpace(lines[insertAt-1]) == "" {
+		insertAt--
+	}
+
+	// Build the insertion block. Ensure it's separated from the prior
+	// content by exactly one blank line, and from the next section by
+	// exactly one blank line (when there is a next section).
+	block := strings.TrimRight(text, "\n")
+	newLines := make([]string, 0, len(lines)+4)
+	newLines = append(newLines, lines[:insertAt]...)
+	// Separator from prior content (skip if immediately after the heading
+	// with no body yet — keep one blank line for readability).
+	if insertAt == startIdx+1 {
+		newLines = append(newLines, "")
+	}
+	newLines = append(newLines, strings.Split(block, "\n")...)
+	if endIdx < len(lines) {
+		newLines = append(newLines, "")
+		newLines = append(newLines, lines[endIdx:]...)
+	} else {
+		// At EOF: preserve a trailing newline element if the original had one.
+		if len(lines) > 0 && lines[len(lines)-1] == "" {
+			newLines = append(newLines, "")
+		}
+	}
+
+	newContent := strings.Join(newLines, "\n")
+	if !strings.HasSuffix(newContent, "\n") {
+		newContent += "\n"
+	}
 	return atomicWrite(abs, newContent)
 }
 
