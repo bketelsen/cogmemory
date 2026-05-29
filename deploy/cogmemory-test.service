@@ -1,0 +1,27 @@
+[Unit]
+Description=Cog Memory Service (test instance for agent integration)
+Documentation=https://github.com/bketelsen/cogmemory
+After=network.target
+
+[Service]
+Type=notify
+ExecStart=%h/.local/bin/cogmemory --config %h/.config/cogmemory/config-test.yml
+Restart=on-failure
+RestartSec=5
+WatchdogSec=30
+NotifyAccess=main
+
+# Environment file for COGMEMORY_* and other settings (optional)
+EnvironmentFile=-%h/.config/cogmemory/.env.test
+
+[Install]
+WantedBy=default.target
+
+# Installation:
+#   ./deploy/install-test-service.sh
+#   systemctl --user enable --now cogmemory-test
+#
+# This is a SECOND, isolated instance separate from cogmemory.service,
+# intended for testing agent integration against a throwaway memory store.
+# Store:  %h/.local/share/cogmemory-test/memory  (empty test tree)
+# Socket: %h/.local/share/cogmemory-test/cog-memory-test.sock

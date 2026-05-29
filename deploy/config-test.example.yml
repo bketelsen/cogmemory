@@ -1,0 +1,12 @@
+# Test instance config. Paths are absolute (the daemon does NOT expand ~ or %h).
+# install-test-service.sh renders __HOME__ to your actual $HOME on install.
+socket_path: __HOME__/.local/share/cogmemory-test/cog-memory-test.sock
+memory_root: __HOME__/.local/share/cogmemory-test/memory
+log_level: debug
+watchdog_sec: 30
+rbac:
+  roles:
+    agent:
+      - pattern: "**"
+        read: true
+        write: true
