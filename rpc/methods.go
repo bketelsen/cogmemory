@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
+	"time"
 
 	"github.com/bketelsen/cogmemory/domain"
 	"github.com/bketelsen/cogmemory/store"
@@ -429,6 +431,149 @@ func (srv *Server) handleGlacierIndexCompute(req Request) Response {
 		"entries": filtered,
 		"count":   len(filtered),
 	})
+}
+
+// --- domain_summary ---
+
+type domainSummaryParams struct {
+	baseParams
+	Domain string `json:"domain"`
+	Since  string `json:"since,omitempty"`
+}
+
+// DomainSummaryResult is the typed envelope returned by domain_summary.
+// Field shape mirrors RPC-CONSOLIDATION.md §5.
+type DomainSummaryResult struct {
+	Domain                    string              `json:"domain"`
+	Label                     string              `json:"label"`
+	HotMemory                 string              `json:"hot_memory"`
+	OpenActionCount           int                 `json:"open_action_count"`
+	CompletedActionCountSince int                 `json:"completed_action_count_since"`
+	RecentObservations        []store.Observation `json:"recent_observations"`
+	FilesPresent              []string            `json:"files_present"`
+	LastActivity              string              `json:"last_activity"`
+	Since                     string              `json:"since"`
+}
+
+func (srv *Server) handleDomainSummary(req Request) Response {
+	var p domainSummaryParams
+	if req.Params != nil {
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return errorResponse(req.ID, CodeInvalidParams, "domain_summary: invalid params: "+err.Error())
+		}
+	}
+	if p.Role == "" {
+		return errorResponse(req.ID, CodeInvalidParams, "domain_summary: role required")
+	}
+	if p.Domain == "" {
+		return errorResponse(req.ID, CodeInvalidParams, "domain_summary: domain required")
+	}
+	if srv.controller == nil {
+		return errorResponse(req.ID, CodeStoreError, "domain_summary: controller unavailable")
+	}
+	d, err := srv.controller.Get(p.Domain)
+	if err != nil {
+		return errorResponse(req.ID, CodeInvalidParams, "domain_summary: "+err.Error())
+	}
+	// Per-domain RBAC gate: the domain's declared path. A role without
+	// read access here gets CodeRBACDenied for the whole call.
+	if !srv.rbac.Check(p.Role, d.Path, "read") {
+		return errorResponse(req.ID, CodeRBACDenied,
+			fmt.Sprintf("domain_summary denied for role %q on %q", p.Role, d.Path))
+	}
+
+	_, sinceDate, err := resolveSince(p.Since)
+	if err != nil {
+		return errorResponse(req.ID, CodeInvalidParams, "domain_summary: "+err.Error())
+	}
+
+	result := DomainSummaryResult{
+		Domain:             d.ID,
+		Label:              d.Label,
+		RecentObservations: []store.Observation{},
+		FilesPresent:       []string{},
+		Since:              sinceDate,
+	}
+
+	var lastActivity time.Time
+
+	for _, file := range d.Files {
+		rel, rerr := srv.controller.ResolveFile(d.ID, file)
+		if rerr != nil {
+			continue
+		}
+		// Per-file RBAC: a role allowed at the domain root can still be
+		// denied on a specific file (e.g. cog-meta/self-observations.md).
+		// Skip silently — caller already got the domain-level allow.
+		if !srv.rbac.Check(p.Role, rel, "read") {
+			continue
+		}
+		exists, _ := srv.store.FileExists(rel)
+		if !exists {
+			continue
+		}
+		result.FilesPresent = append(result.FilesPresent, file)
+
+		if mt, _ := srv.store.FileModTime(rel); mt.After(lastActivity) {
+			lastActivity = mt
+		}
+
+		switch file {
+		case "hot-memory":
+			if content, rerr := srv.store.Read(rel, "", 0, 0); rerr == nil {
+				result.HotMemory = content
+			}
+		case "action-items":
+			if open, completed, cerr := srv.store.CountActions(rel, sinceDate); cerr == nil {
+				result.OpenActionCount = open
+				result.CompletedActionCountSince = completed
+			}
+		case "observations":
+			if obs, oerr := srv.store.RecentObservations(rel, sinceDate); oerr == nil {
+				result.RecentObservations = obs
+				// Bias last_activity off the newest observation date too —
+				// mtime can lag if a file was touched without content edits.
+				for _, o := range obs {
+					if t, terr := time.Parse("2006-01-02", o.Date); terr == nil && t.After(lastActivity) {
+						lastActivity = t
+					}
+				}
+			}
+		}
+	}
+	if !lastActivity.IsZero() {
+		result.LastActivity = lastActivity.UTC().Format("2006-01-02")
+	}
+	return okResponse(req.ID, result)
+}
+
+// resolveSince parses the `since` param into a cutoff time + YYYY-MM-DD
+// floor. Accepted forms: "" (→ 7d ago), YYYY-MM-DD, RFC3339, Go duration
+// (with "Nd" rewritten to N*24h).
+func resolveSince(s string) (time.Time, string, error) {
+	now := time.Now().UTC()
+	if s == "" {
+		t := now.Add(-7 * 24 * time.Hour)
+		return t, t.Format("2006-01-02"), nil
+	}
+	if t, err := time.Parse("2006-01-02", s); err == nil {
+		return t, t.Format("2006-01-02"), nil
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, t.UTC().Format("2006-01-02"), nil
+	}
+	parseSpec := s
+	if strings.HasSuffix(s, "d") {
+		var days int
+		if _, err := fmt.Sscanf(s, "%dd", &days); err == nil && days > 0 {
+			parseSpec = fmt.Sprintf("%dh", days*24)
+		}
+	}
+	if d, err := time.ParseDuration(parseSpec); err == nil {
+		t := now.Add(-d)
+		return t, t.Format("2006-01-02"), nil
+	}
+	return time.Time{}, "", fmt.Errorf("unrecognized `since` value %q (want YYYY-MM-DD, RFC3339, or duration like \"7d\"/\"168h\")", s)
 }
 
 // --- health ---

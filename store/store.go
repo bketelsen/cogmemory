@@ -868,6 +868,153 @@ func parseOpenActionItem(domain, path string, line int, raw string) (OpenActionI
 	return item, true
 }
 
+// Observation is one parsed entry from an observations.md file:
+// "- YYYY-MM-DD [tag1,tag2]: text".
+type Observation struct {
+	Date string   `json:"date"`
+	Tags []string `json:"tags"`
+	Text string   `json:"text"`
+}
+
+// obsParseRE captures (date, tags, text) from a validated observation line.
+var obsParseRE = regexp.MustCompile(`^-\s+(\d{4}-\d{2}-\d{2})\s+\[([^\]]+)\]:\s*(.+?)\s*$`)
+
+// RecentObservations reads relPath and returns parsed observations whose
+// date is >= sinceDate (YYYY-MM-DD lexical compare). sinceDate "" disables
+// the filter. Missing file → (nil, nil). Non-conforming lines are skipped.
+func (s *MemoryStore) RecentObservations(relPath, sinceDate string) ([]Observation, error) {
+	abs, err := s.absPath(relPath)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Open(abs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("store: recent observations: %w", err)
+	}
+	defer f.Close()
+	if err := lockShared(f); err != nil {
+		return nil, fmt.Errorf("store: lock %q: %w", relPath, err)
+	}
+	defer unlock(f)
+
+	out := []Observation{}
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64*1024), 1<<20)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		m := obsParseRE.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		if sinceDate != "" && m[1] < sinceDate {
+			continue
+		}
+		var tags []string
+		for _, t := range strings.Split(m[2], ",") {
+			t = strings.TrimSpace(t)
+			if t != "" {
+				tags = append(tags, t)
+			}
+		}
+		out = append(out, Observation{Date: m[1], Tags: tags, Text: m[3]})
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("store: recent observations scan %q: %w", relPath, err)
+	}
+	return out, nil
+}
+
+// addedDateRE — defined in housekeeping.go (same package). Reused here.
+
+// CountActions scans an action-items.md file at relPath and returns
+// (openCount, completedSinceCount). openCount counts every "- [ ]" line.
+// completedSinceCount counts "- [x]" lines whose metadata includes
+// "added:YYYY-MM-DD" with date >= sinceDate. Completed items without an
+// added: tag are not counted (no date → cannot place in a since window).
+// When sinceDate is "", every completed item counts.
+// Missing file → (0, 0, nil). Skips fenced code and HTML comments.
+func (s *MemoryStore) CountActions(relPath, sinceDate string) (int, int, error) {
+	abs, err := s.absPath(relPath)
+	if err != nil {
+		return 0, 0, err
+	}
+	f, err := os.Open(abs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, 0, nil
+		}
+		return 0, 0, fmt.Errorf("store: count actions: %w", err)
+	}
+	defer f.Close()
+	if err := lockShared(f); err != nil {
+		return 0, 0, fmt.Errorf("store: lock %q: %w", relPath, err)
+	}
+	defer unlock(f)
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64*1024), 1<<20)
+	var open, completed int
+	inComment, inFence := false, false
+	for scanner.Scan() {
+		trimmed := strings.TrimSpace(scanner.Text())
+		if skipActionLine(trimmed, &inComment, &inFence) {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(trimmed, "- [ ] "):
+			open++
+		case strings.HasPrefix(trimmed, "- [x] "), strings.HasPrefix(trimmed, "- [X] "):
+			if sinceDate == "" {
+				completed++
+				continue
+			}
+			m := addedDateRE.FindStringSubmatch(trimmed)
+			if m != nil && m[1] >= sinceDate {
+				completed++
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return 0, 0, fmt.Errorf("store: count actions scan %q: %w", relPath, err)
+	}
+	return open, completed, nil
+}
+
+// FileModTime returns the mtime of relPath. Missing file → (zero, nil).
+func (s *MemoryStore) FileModTime(relPath string) (time.Time, error) {
+	abs, err := s.absPath(relPath)
+	if err != nil {
+		return time.Time{}, err
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return time.Time{}, nil
+		}
+		return time.Time{}, fmt.Errorf("store: mtime %q: %w", relPath, err)
+	}
+	return info.ModTime(), nil
+}
+
+// FileExists reports whether relPath exists as a regular file under root.
+func (s *MemoryStore) FileExists(relPath string) (bool, error) {
+	abs, err := s.absPath(relPath)
+	if err != nil {
+		return false, err
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("store: exists %q: %w", relPath, err)
+	}
+	return !info.IsDir(), nil
+}
+
 // isObsPath returns true if the path looks like an observations file.
 func isObsPath(relPath string) bool {
 	return strings.HasSuffix(relPath, "observations.md")
