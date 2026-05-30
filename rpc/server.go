@@ -140,6 +140,8 @@ func (srv *Server) dispatch(line []byte) Response {
 		return srv.handleL0Index(req)
 	case "list":
 		return srv.handleList(req)
+	case "open_actions":
+		return srv.handleOpenActions(req)
 	case "health":
 		return srv.handleHealth(req)
 	case "git":

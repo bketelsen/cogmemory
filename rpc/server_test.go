@@ -48,6 +48,10 @@ func newTestServer(t *testing.T) *testServer {
 				{Pattern: "cog-meta/self-observations.md", Read: false, Write: false},
 				{Pattern: "**", Read: true, Write: false},
 			},
+			"project-reader": {
+				{Pattern: "projects/**", Read: true, Write: false},
+				{Pattern: "**", Read: false, Write: false},
+			},
 		},
 	}
 	r := rbac.New(cfg)
@@ -431,6 +435,203 @@ func TestHealthMethod(t *testing.T) {
 	json.Unmarshal(resp.Result, &result)
 	if result["ok"] != true {
 		t.Errorf("health result = %v, want {ok: true}", result)
+	}
+}
+
+func TestOpenActionsMethodReturnsReadableUncheckedItems(t *testing.T) {
+	ts := newTestServer(t)
+
+	call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 1, Method: "write",
+		Params: map[string]interface{}{
+			"role": "siona",
+			"path": "projects/dakota/action-items.md",
+			"content": strings.Join([]string{
+				"# Dakota Actions",
+				"",
+				"<!-- Format: - [ ] template | due:YYYY-MM-DD | pri:high -->",
+				"- [ ] Ship open-actions RPC | due:2026-06-01 | pri:high | added:2026-05-30",
+				"- [x] Closed task | pri:low",
+			}, "\n"),
+		},
+	})
+	call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 2, Method: "write",
+		Params: map[string]interface{}{
+			"role":    "siona",
+			"path":    "personal/action-items.md",
+			"content": "- [ ] Private task | pri:medium\n",
+		},
+	})
+
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0",
+		ID:      3,
+		Method:  "open_actions",
+		Params:  map[string]interface{}{"role": "project-reader"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("open_actions error: %v", resp.Error.Message)
+	}
+
+	var result struct {
+		Items []struct {
+			Domain   string `json:"domain"`
+			Path     string `json:"path"`
+			Line     int    `json:"line"`
+			Text     string `json:"text"`
+			Raw      string `json:"raw"`
+			Due      string `json:"due,omitempty"`
+			Priority string `json:"priority,omitempty"`
+			Added    string `json:"added,omitempty"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("unmarshal open_actions result: %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("open_actions returned %d items, want 1: %+v", len(result.Items), result.Items)
+	}
+	item := result.Items[0]
+	if item.Domain != "dakota" ||
+		item.Path != "projects/dakota/action-items.md" ||
+		item.Line != 4 ||
+		item.Text != "Ship open-actions RPC" ||
+		item.Raw != "- [ ] Ship open-actions RPC | due:2026-06-01 | pri:high | added:2026-05-30" ||
+		item.Due != "2026-06-01" ||
+		item.Priority != "high" ||
+		item.Added != "2026-05-30" {
+		t.Fatalf("open_actions item = %+v", item)
+	}
+}
+
+func TestOpenActionsMethodEmptyResultIsArray(t *testing.T) {
+	ts := newTestServer(t)
+
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0",
+		ID:      1,
+		Method:  "open_actions",
+		Params:  map[string]interface{}{"role": "siona"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("open_actions error: %v", resp.Error.Message)
+	}
+
+	var result struct {
+		Items []json.RawMessage `json:"items"`
+	}
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("unmarshal open_actions result: %v", err)
+	}
+	if result.Items == nil {
+		t.Fatal("items is nil, want empty JSON array")
+	}
+	if len(result.Items) != 0 {
+		t.Fatalf("items length = %d, want 0", len(result.Items))
+	}
+}
+
+// Broad role (siona) sees items from every action-items file regardless of
+// domain. Without this, the only thing the RBAC filter is proven to do is
+// hide personal/ from project-reader; the wide-permission path stays untested.
+func TestOpenActionsMethodBroadRoleSeesAllItems(t *testing.T) {
+	ts := newTestServer(t)
+
+	call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 1, Method: "write",
+		Params: map[string]interface{}{
+			"role":    "siona",
+			"path":    "projects/dakota/action-items.md",
+			"content": "- [ ] project task | pri:high\n",
+		},
+	})
+	call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 2, Method: "write",
+		Params: map[string]interface{}{
+			"role":    "siona",
+			"path":    "personal/action-items.md",
+			"content": "- [ ] personal task | pri:low\n",
+		},
+	})
+
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0",
+		ID:      3,
+		Method:  "open_actions",
+		Params:  map[string]interface{}{"role": "siona"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("open_actions error: %v", resp.Error.Message)
+	}
+
+	var result struct {
+		Items []struct {
+			Domain string `json:"domain"`
+			Text   string `json:"text"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("unmarshal open_actions result: %v", err)
+	}
+	if len(result.Items) != 2 {
+		t.Fatalf("open_actions returned %d items, want 2: %+v", len(result.Items), result.Items)
+	}
+	domains := map[string]bool{}
+	for _, it := range result.Items {
+		domains[it.Domain] = true
+	}
+	if !domains["dakota"] || !domains["personal"] {
+		t.Fatalf("expected both dakota and personal items; got domains %v", domains)
+	}
+}
+
+// Reject malformed params loudly rather than silently treating role as "".
+func TestOpenActionsMethodInvalidParams(t *testing.T) {
+	ts := newTestServer(t)
+
+	// Send raw bytes that aren't valid JSON for openActionsParams.
+	conn, err := net.Dial("unix", ts.socketPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte(`{"jsonrpc":"2.0","id":1,"method":"open_actions","params":"not-an-object"}` + "\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	buf := make([]byte, 4096)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var resp rpcResponse
+	if err := json.Unmarshal(buf[:n], &resp); err != nil {
+		t.Fatalf("unmarshal: %v (raw=%s)", err, string(buf[:n]))
+	}
+	if resp.Error == nil {
+		t.Fatalf("expected error for malformed params, got result: %s", string(resp.Result))
+	}
+	if resp.Error.Code != rpc.CodeInvalidParams {
+		t.Fatalf("error code = %d, want %d (%v)", resp.Error.Code, rpc.CodeInvalidParams, resp.Error.Message)
+	}
+}
+
+// Empty role string must be rejected, not silently routed to rbac.Check("") and
+// returning whatever that policy happens to allow.
+func TestOpenActionsMethodMissingRole(t *testing.T) {
+	ts := newTestServer(t)
+
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0",
+		ID:      1,
+		Method:  "open_actions",
+		Params:  map[string]interface{}{"role": ""},
+	})
+	if resp.Error == nil {
+		t.Fatalf("expected error for empty role, got result: %s", string(resp.Result))
+	}
+	if resp.Error.Code != rpc.CodeInvalidParams {
+		t.Fatalf("error code = %d, want %d", resp.Error.Code, rpc.CodeInvalidParams)
 	}
 }
 

@@ -796,6 +796,71 @@ func TestList(t *testing.T) {
 	}
 }
 
+func TestOpenActionsReturnsUncheckedItemsFromActionFiles(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := store.New(dir)
+	writeFile(t, dir, "projects/dakota/action-items.md", strings.Join([]string{
+		"# Dakota Actions",
+		"",
+		"<!-- Format: - [ ] template | due:YYYY-MM-DD | pri:high -->",
+		"- [ ] Ship open-actions RPC | due:2026-06-01 | pri:high | added:2026-05-30",
+		"- [x] Already done | due:2026-05-01",
+		"<!--",
+		"- [ ] commented-out task",
+		"-->",
+		"```",
+		"- [ ] code sample",
+		"```",
+	}, "\n"))
+	writeFile(t, dir, "personal/action-items.md", "- [ ] Buy coffee | pri:low\n")
+	writeFile(t, dir, "notes.md", "- [ ] not an action file\n")
+
+	items, err := s.OpenActions()
+	if err != nil {
+		t.Fatalf("OpenActions: %v", err)
+	}
+
+	want := []store.OpenActionItem{
+		{
+			Domain:   "personal",
+			Path:     "personal/action-items.md",
+			Line:     1,
+			Text:     "Buy coffee",
+			Raw:      "- [ ] Buy coffee | pri:low",
+			Priority: "low",
+		},
+		{
+			Domain:   "dakota",
+			Path:     "projects/dakota/action-items.md",
+			Line:     4,
+			Text:     "Ship open-actions RPC",
+			Raw:      "- [ ] Ship open-actions RPC | due:2026-06-01 | pri:high | added:2026-05-30",
+			Due:      "2026-06-01",
+			Priority: "high",
+			Added:    "2026-05-30",
+		},
+	}
+	if !reflect.DeepEqual(items, want) {
+		t.Fatalf("OpenActions() = %#v, want %#v", items, want)
+	}
+}
+
+func TestOpenActionsEmptyResultIsNonNil(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := store.New(dir)
+
+	items, err := s.OpenActions()
+	if err != nil {
+		t.Fatalf("OpenActions: %v", err)
+	}
+	if items == nil {
+		t.Fatal("OpenActions returned nil slice, want empty slice")
+	}
+	if len(items) != 0 {
+		t.Fatalf("OpenActions returned %d items, want 0", len(items))
+	}
+}
+
 func TestFileScansSkipGitDirectory(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := store.New(dir)
