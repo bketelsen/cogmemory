@@ -9,6 +9,7 @@ import (
 	"os"
 	"sync"
 
+	"github.com/bketelsen/cogmemory/domain"
 	"github.com/bketelsen/cogmemory/rbac"
 	"github.com/bketelsen/cogmemory/store"
 )
@@ -49,16 +50,20 @@ func (e *RPCError) Error() string {
 	return fmt.Sprintf("rpc error %d: %s", e.Code, e.Message)
 }
 
-// Server is a JSON-RPC 2.0 server backed by a MemoryStore and RBAC engine.
+// Server is a JSON-RPC 2.0 server backed by a MemoryStore, RBAC engine,
+// and the domain Controller (canonical registry of memory domains).
 type Server struct {
-	store *store.MemoryStore
-	rbac  *rbac.Engine
-	wg    sync.WaitGroup
+	store      *store.MemoryStore
+	rbac       *rbac.Engine
+	controller *domain.Controller
+	wg         sync.WaitGroup
 }
 
-// New creates a new RPC server.
-func New(s *store.MemoryStore, r *rbac.Engine) *Server {
-	return &Server{store: s, rbac: r}
+// New creates a new RPC server. controller may be nil — in that case the
+// domain.* methods return errors and open_actions runs with an empty target
+// list (i.e. produces no items). Production callers should always pass one.
+func New(s *store.MemoryStore, r *rbac.Engine, c *domain.Controller) *Server {
+	return &Server{store: s, rbac: r, controller: c}
 }
 
 // Listen creates a Unix Domain Socket listener, removing any stale socket file.
@@ -142,6 +147,10 @@ func (srv *Server) dispatch(line []byte) Response {
 		return srv.handleList(req)
 	case "open_actions":
 		return srv.handleOpenActions(req)
+	case "domains.list":
+		return srv.handleDomainsList(req)
+	case "domains.get":
+		return srv.handleDomainsGet(req)
 	case "health":
 		return srv.handleHealth(req)
 	case "git":

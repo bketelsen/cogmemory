@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/bketelsen/cogmemory/config"
+	"github.com/bketelsen/cogmemory/domain"
 	"github.com/bketelsen/cogmemory/rbac"
 	"github.com/bketelsen/cogmemory/rpc"
 	"github.com/bketelsen/cogmemory/store"
@@ -25,6 +26,25 @@ type testServer struct {
 	ln         net.Listener
 	done       chan struct{}
 }
+
+const defaultDomainsYAML = `version: 1
+domains:
+  - id: dakota
+    path: projects/dakota
+    label: Dakota
+    triggers: [dakota]
+    files: [hot-memory, action-items, observations, entities]
+  - id: personal
+    path: personal
+    label: Personal
+    triggers: [personal]
+    files: [hot-memory, action-items, observations, entities]
+  - id: work
+    path: work/microsoft
+    label: Microsoft
+    triggers: [work, msft]
+    files: [hot-memory, action-items, observations, entities]
+`
 
 func newTestServer(t *testing.T) *testServer {
 	t.Helper()
@@ -55,7 +75,19 @@ func newTestServer(t *testing.T) *testServer {
 		},
 	}
 	r := rbac.New(cfg)
-	srv := rpc.New(s, r)
+	// Seed a default domains.yml covering the action-items fixtures used
+	// across these tests. Individual tests may overwrite it.
+	if err := os.MkdirAll(memoryRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(memoryRoot, "domains.yml"), []byte(defaultDomainsYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctrl, err := domain.New(memoryRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := rpc.New(s, r, ctrl)
 
 	socketPath := filepath.Join(dir, "test.sock")
 	ln, err := rpc.Listen(socketPath)
@@ -640,6 +672,11 @@ func TestGitStatusMethodAllowsReadOnlyRole(t *testing.T) {
 		t.Skip("git not available")
 	}
 	ts := newTestServer(t)
+	// Start from an empty tree so the seeded domains.yml doesn't show up
+	// as untracked in `git status --porcelain`.
+	if err := os.Remove(filepath.Join(ts.memoryRoot, "domains.yml")); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
 	cmd := exec.Command("git", "init")
 	cmd.Dir = ts.memoryRoot
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -749,4 +786,159 @@ func TestListenRemovesStaleSocket(t *testing.T) {
 		t.Fatalf("Listen with stale socket: %v", err)
 	}
 	ln.Close()
+}
+
+func TestDomainsListReturnsRegistry(t *testing.T) {
+	ts := newTestServer(t)
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 1, Method: "domains.list",
+		Params: map[string]interface{}{"role": "siona"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("domains.list error: %v", resp.Error.Message)
+	}
+	var result struct {
+		Domains []struct {
+			ID    string   `json:"id"`
+			Path  string   `json:"path"`
+			Files []string `json:"files"`
+		} `json:"domains"`
+	}
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(result.Domains) != 3 {
+		t.Fatalf("got %d domains, want 3: %+v", len(result.Domains), result.Domains)
+	}
+}
+
+func TestDomainsListFiltersByRBAC(t *testing.T) {
+	ts := newTestServer(t)
+	// project-reader can only see projects/** — that's just the dakota domain.
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 1, Method: "domains.list",
+		Params: map[string]interface{}{"role": "project-reader"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("domains.list error: %v", resp.Error.Message)
+	}
+	var result struct {
+		Domains []struct {
+			ID string `json:"id"`
+		} `json:"domains"`
+	}
+	json.Unmarshal(resp.Result, &result)
+	if len(result.Domains) != 1 || result.Domains[0].ID != "dakota" {
+		t.Fatalf("RBAC filter wrong: %+v", result.Domains)
+	}
+}
+
+func TestDomainsGetEnforcesRBAC(t *testing.T) {
+	ts := newTestServer(t)
+	// project-reader cannot read personal/.
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 1, Method: "domains.get",
+		Params: map[string]interface{}{"role": "project-reader", "id": "personal"},
+	})
+	if resp.Error == nil || resp.Error.Code != rpc.CodeRBACDenied {
+		t.Fatalf("expected RBACDenied, got %+v", resp.Error)
+	}
+	// But can read dakota.
+	resp = call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 2, Method: "domains.get",
+		Params: map[string]interface{}{"role": "project-reader", "id": "dakota"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("domains.get(dakota): %v", resp.Error.Message)
+	}
+}
+
+func TestDomainsGetUnknownReturnsError(t *testing.T) {
+	ts := newTestServer(t)
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 1, Method: "domains.get",
+		Params: map[string]interface{}{"role": "siona", "id": "nope"},
+	})
+	if resp.Error == nil {
+		t.Fatal("expected error for unknown id")
+	}
+}
+
+func TestOpenActionsDomainFilter(t *testing.T) {
+	ts := newTestServer(t)
+	call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 1, Method: "write",
+		Params: map[string]interface{}{
+			"role":    "siona",
+			"path":    "projects/dakota/action-items.md",
+			"content": "- [ ] dakota task\n",
+		},
+	})
+	call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 2, Method: "write",
+		Params: map[string]interface{}{
+			"role":    "siona",
+			"path":    "personal/action-items.md",
+			"content": "- [ ] personal task\n",
+		},
+	})
+	// Filter to dakota only — personal should not appear.
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 3, Method: "open_actions",
+		Params: map[string]interface{}{"role": "siona", "domain": "dakota"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("open_actions: %v", resp.Error.Message)
+	}
+	var result struct {
+		Items []struct {
+			Domain string `json:"domain"`
+			Text   string `json:"text"`
+		} `json:"items"`
+	}
+	json.Unmarshal(resp.Result, &result)
+	if len(result.Items) != 1 || result.Items[0].Domain != "dakota" {
+		t.Fatalf("filter did not isolate dakota: %+v", result.Items)
+	}
+}
+
+func TestOpenActionsDomainFilterUnknownErrors(t *testing.T) {
+	ts := newTestServer(t)
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 1, Method: "open_actions",
+		Params: map[string]interface{}{"role": "siona", "domain": "ghost"},
+	})
+	if resp.Error == nil {
+		t.Fatal("want error for unknown domain")
+	}
+}
+
+// Confirms the refactored handler attributes domain from the controller
+// (work/microsoft → "work") rather than the leaf basename ("microsoft").
+func TestOpenActionsDomainComesFromController(t *testing.T) {
+	ts := newTestServer(t)
+	call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 1, Method: "write",
+		Params: map[string]interface{}{
+			"role":    "siona",
+			"path":    "work/microsoft/action-items.md",
+			"content": "- [ ] work task\n",
+		},
+	})
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 2, Method: "open_actions",
+		Params: map[string]interface{}{"role": "siona", "domain": "work"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("open_actions: %v", resp.Error.Message)
+	}
+	var result struct {
+		Items []struct {
+			Domain string `json:"domain"`
+		} `json:"items"`
+	}
+	json.Unmarshal(resp.Result, &result)
+	if len(result.Items) != 1 || result.Items[0].Domain != "work" {
+		t.Fatalf("want domain=work (from controller), got %+v", result.Items)
+	}
 }

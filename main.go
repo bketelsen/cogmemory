@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/bketelsen/cogmemory/config"
+	"github.com/bketelsen/cogmemory/domain"
 	"github.com/bketelsen/cogmemory/health"
 	"github.com/bketelsen/cogmemory/rbac"
 	"github.com/bketelsen/cogmemory/rpc"
@@ -48,7 +49,15 @@ func main() {
 	}
 
 	r := rbac.New(cfg.RBAC)
-	srv := rpc.New(s, r)
+	ctrl, err := domain.New(cfg.MemoryRoot)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cogmemory: domain controller error: %v\n", err)
+		os.Exit(1)
+	}
+	if lerr := ctrl.LastError(); lerr != nil {
+		log.Printf("cogmemory: domain controller warning: %v", lerr)
+	}
+	srv := rpc.New(s, r, ctrl)
 
 	ln, err := rpc.Listen(cfg.SocketPath)
 	if err != nil {
