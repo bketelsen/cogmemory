@@ -433,6 +433,281 @@ Range: **~10–14 → ~8 round-trips**, with the satellite-scaling cliff removed
 
 ---
 
+## housekeeping
+
+Source: <https://github.com/marciopuga/cog/blob/main/.claude/commands/housekeeping.md>
+
+Housekeeping is the structural-maintenance pass: garbage-collect old
+observations and completed action items into glacier, prune hot-memory
+to its line cap, surface stale items and dormant domains, rebuild the
+glacier and link indexes, audit entity-registry format and temporal
+markers, refresh L0 headers and per-domain `INDEX.md` files, and write
+the briefing-bridge that foresight will consume. It is the largest
+read-only-scan command in cog-prime — every step starts with "scan all
+files of kind X across all domains."
+
+### 1. Original orientation block
+
+> ```bash
+> # What changed since last run? Focus here first.
+> find memory/ -type f -name "*.md" -mtime -1 | sort
+>
+> # Quick entry counts for archival threshold checks (>50 = archive)
+> # Add paths for any domain observations files that exist
+> grep -c "^- " memory/cog-meta/self-observations.md memory/personal/observations.md memory/*/observations.md memory/*/*/observations.md 2>/dev/null
+>
+> # Completed action items count (>10 = archive)
+> grep -c "^\- \[x\]" memory/personal/action-items.md memory/*/action-items.md memory/*/*/action-items.md 2>/dev/null
+> ```
+>
+> Only read files that need work based on these results. Skip unchanged files.
+
+Three shell scans across the entire memory tree, then implicit reads of
+`memory/domains.yml` and per-domain `hot-memory.md` (50-line cap check)
+and `cog-meta/improvements.md` (10-item cap check) before any work
+begins.
+
+### 2. Rewritten orientation block
+
+One RPC covers the whole orient pass:
+
+- `housekeeping_scan(role)` — returns `since`, `changed_recently[]`,
+  and the `thresholds` envelope:
+  `observations_over_cap[]` (with pre-bucketed `by_primary_tag` counts),
+  `completed_actions_over_cap[]`, `improvements_implemented_over_cap[]`,
+  `hot_memory_over_cap[]`, plus `dormant_domains[]` and
+  `stale_action_items[]`. The driving fields are:
+  - `changed_recently[]` → scope of every subsequent sweep (skip files
+    not in this set unless the step is a full rebuild).
+  - `thresholds.observations_over_cap[].by_primary_tag` → drives §1
+    archival routing directly (group key = bucket name, no re-parse).
+  - `thresholds.*_over_cap[]` → drives §1 archival decisions for
+    action-items, improvements, and hot-memory cap enforcement.
+  - `dormant_domains[]` + `stale_action_items[]` → feed §3 and §7 (the
+    briefing bridge) without extra scans.
+
+If a downstream step needs domain-level shape that `housekeeping_scan`
+doesn't carry (per-domain hot-memory body for §2 pruning, full
+`entities.md` block for §5b/§5c), pull it lazily with
+`domain_summary(role, domain)` or `entity_audit(role)` — both already
+exist.
+
+### 3. Original process steps involving memory reads
+
+> **§1 Garbage Collect Memory**
+>
+> Review and archive stale data per CLAUDE.md glacier rules. All glacier
+> files must have YAML frontmatter.
+> - If any `observations.md` has >50 entries, group oldest entries by
+>   primary tag and move to `memory/glacier/{domain}/observations-{tag}.md`
+> - If `memory/cog-meta/self-observations.md` has >50 entries, group by
+>   primary tag → `memory/glacier/cog-meta/observations-{tag}.md`
+> - If any `action-items.md` has >10 completed items, move to
+>   `memory/glacier/{domain}/action-items-done.md`
+> - Apply same logic for all domains listed in `memory/domains.yml`
+> - If `memory/cog-meta/improvements.md` has >10 implemented items, move
+>   to `memory/glacier/cog-meta/improvements-done-{YYYY}.md`
+
+> **§2 Prune Hot Memory (rule-based)**
+>
+> Read `memory/domains.yml` to discover all active domains. Check
+> `hot-memory.md` for each domain, plus the cross-domain
+> `memory/hot-memory.md`. Keep ALL under 50 lines.
+
+> **§3 Surface Opportunities & Accountability**
+>
+> Review all `action-items.md` files across every domain:
+> - Stale items (open >2 weeks): list with age and suggested next action
+> - Dormant domains: if any domain has 0 new observations in >4 weeks, flag
+> - Health escalation: items open >6 months get flagged with urgency label
+> - Birthday prep: if any birthday in entities.md is <2 weeks away, pull
+>   interests and suggest ideas
+
+> **§4 Rebuild Glacier Index**
+>
+> Scan all `memory/glacier/**/*.md` files. Extract YAML frontmatter.
+> Write results to `memory/glacier/index.md`.
+
+> **§5 Link Audit (discover missing links)**
+>
+> For each non-glacier memory file: scan for names matching `### <Name>`
+> headers in entities.md — add `[[links]]` if missing; add cross-domain
+> references; link action item references.
+
+> **§5b Entity Registry Format Enforcement**
+>
+> Scan all `entities.md` files for registry format compliance: 3-line
+> max, glacier candidates (`status: inactive` or `last:` >6mo), missing
+> `status:` / `last:` fields.
+
+> **§5c Temporal Fact Maintenance**
+>
+> Scan all `entities.md` files for `(until YYYY-MM)` markers with past
+> dates; add ~~strikethrough~~ or move to `## Historical` block.
+
+> **§6 Rebuild Link Index**
+>
+> Scan all memory files (excluding `glacier/`) for `[[wiki-links]]`. For
+> each link, record: target → source. Rewrite `memory/link-index.md`.
+
+> **§8 L0 Header Maintenance**
+>
+> Check all active memory files for missing `<!-- L0: ... -->` headers.
+
+> **§9 Rebuild Domain Indexes**
+>
+> Regenerate `INDEX.md` for each domain directory. List `.md` files,
+> extract L0 summaries, write the table.
+
+### 4. Rewritten process steps
+
+Step-by-step replacement; the file-scan loops above collapse into
+dedicated RPCs. Writes (archival moves, the `index.md` / `link-index.md`
+/ `briefing-bridge.md` rewrites, `cog_patch` / `cog_append` for
+hot-memory trims and entity fixes) stay as direct
+`cog_append` / `cog_patch` / `cog_write` calls — they're already single
+calls and write paths are out of scope per guardrails.
+
+- **§1 garbage collect** — `housekeeping_scan` from orientation already
+  carries `observations_over_cap[].by_primary_tag`,
+  `completed_actions_over_cap[]`, and
+  `improvements_implemented_over_cap[]`. No re-scan needed. For each
+  flagged file, the LLM picks which entries to move (judgment: which
+  rows count as "oldest" within a tag bucket when timestamps are
+  irregular) and issues the move via `cog_append` to the glacier path +
+  `cog_patch` to remove from the source. The frontmatter for the new
+  glacier slab is composed by the LLM and written with `cog_write`
+  (allow-list covers `glacier/**/*.md`).
+- **§2 prune hot-memory** — `housekeeping_scan.thresholds
+  .hot_memory_over_cap[]` identifies files that exceed 50 lines without
+  reading them. For each one, `domain_summary(role, domain)` returns
+  the current `hot_memory` body; the LLM applies the priority order
+  (resolved → past-events → SSOT-violations → stale → low-signal) and
+  the trim lands as a `cog_patch`. SSOT-violation detection still needs
+  the model to compare hot-memory lines against the canonical file's
+  content — no RPC enforces that semantic equality.
+- **§3 stale items + dormant domains + birthday prep** — the first two
+  come straight from `housekeeping_scan.stale_action_items[]` and
+  `dormant_domains[]` (no extra calls). Health escalation (open >6
+  months) is the same `stale_action_items[]` row filtered by `age_days`
+  — drive the urgency label off that field. Birthday prep is the
+  exception: `entity_audit(role)` returns entity blocks with metadata
+  but does not parse `birthday:` / `dob:` fields. **No RPC** covers a
+  birthday-window scan; fall back to `domain_summary(role, "personal")`
+  for the body and let the LLM scan for upcoming dates. (Logged under
+  Gaps.)
+- **§4 rebuild glacier index** — `glacier_index_compute(role)` returns
+  the full `entries[]` array (`path, domain, type, tags, date_range,
+  entries, summary`) in one call; the LLM renders the markdown table
+  and writes via `cog_write` (glacier/index.md is on the allow-list).
+- **§5 link audit** — `link_audit(role)` returns
+  `candidates[{source_path, line, entity_name, target_link, context}]`.
+  The LLM decides which references are substantive enough to patch in
+  (the candidate set is suggestions, not auto-edits), then issues
+  `cog_patch` per accepted link.
+- **§5b entity format enforcement** + **§5c temporal facts** —
+  `entity_audit(role)` returns `format_violations[]`,
+  `glacier_candidates[]`, `missing_metadata[]`, and
+  `temporal_violations[]` in one envelope. The LLM applies the fixes:
+  format compression / `~~strikethrough~~` / move-to-Historical /
+  glacier promotion. All edits are `cog_patch`; promotions to glacier
+  use `cog_append` + `cog_patch` of the source stub.
+- **§6 rebuild link index** — `link_index_compute(role)` returns the
+  reverse index `[{target, sources[]}]`; render and write via
+  `cog_write` to `link-index.md` (on the allow-list).
+- **§7 write briefing bridge** — pure write step. The content is
+  assembled from data already on hand:
+  `housekeeping_scan.stale_action_items` (Stale Items section),
+  `housekeeping_scan.dormant_domains` (Dormant Domains section),
+  filtered stale items with `age_days > 180` (Health Escalation), and
+  the §3 birthday output (Birthday Prep). Write via `cog_write` to
+  `cog-meta/briefing-bridge.md` (on the allow-list).
+- **§8 L0 header maintenance** — no RPC enumerates files missing the
+  `<!-- L0: ... -->` header. `housekeeping_scan.changed_recently[]`
+  bounds the scope; for each candidate, `cog_outline(path)` reveals
+  whether the L0 comment is present without a full read. When absent,
+  the LLM reads, composes the one-liner, and writes via `cog_patch`
+  inserting after the `# Title` line. (Logged under Gaps.)
+- **§9 rebuild domain indexes** — for each domain returned by
+  `session_brief(role).domains`, call `domain_summary(role, domain)`
+  once to get `files_present[]` and (lazily) the L0 summaries; render
+  the per-domain `INDEX.md` table and write via `cog_write`
+  (`**/INDEX.md` is on the allow-list). No L0-aggregation RPC exists,
+  so the per-file L0 extraction happens from the `domain_summary`
+  envelope rather than N individual reads.
+
+### 5. LLM-judgment-preserved callout
+
+The rewrite keeps the model on the hook for everything that is not a
+mechanical fetch or a structural rewrite:
+
+- Picking *which oldest entries* to move when archiving an
+  observations file by primary tag (timestamps can be irregular;
+  bucket boundaries are a judgment call).
+- Composing the YAML frontmatter for newly-created glacier slabs
+  (domain, type, tags, date_range, summary text).
+- Pruning hot-memory by the five-rule priority order: which lines are
+  resolved, past-events, SSOT-violations, stale, low-signal. The RPC
+  proves only that the file is *over cap* — what to cut is judgment.
+- Detecting SSOT violations between hot-memory lines and canonical
+  files (no RPC enforces semantic equality of two prose lines).
+- Deciding which `link_audit` candidates are "substantive enough" to
+  patch — `link_audit` proposes, the LLM disposes.
+- Composing each L0 one-liner (≤80 chars summarizing file purpose) and
+  the per-domain INDEX summary header.
+- Writing the briefing-bridge: choosing which stale items deserve a
+  named suggested-action vs grouping under the "stale >4 weeks → one
+  line per domain" compression rule.
+- Phrasing the §10 debrief.
+
+### 6. Round-trip delta
+
+Original orient + scan + read passes against a representative ~6-domain
+memory tree (counting each shell scan, each per-file read needed by §1,
+§2, §3, §5, §5b, §5c, §6, §8, §9):
+
+- 3 shell scans (find / grep observations / grep completed actions)
+- 1 `domains.yml` read
+- ~6 × `hot-memory.md` reads (§2 cap check)
+- ~6 × `observations.md` reads (§1 archival routing)
+- ~6 × `action-items.md` reads (§3 stale-item scan)
+- ~6 × `entities.md` reads × 2 (§5 link audit + §5b/§5c format/temporal)
+- N glacier reads for §4 index rebuild (~10–30 on a mature tree)
+- M memory file reads for §6 link-index rebuild (excluding glacier;
+  typically 25–40 on a 6-domain tree)
+- ~6 × `INDEX.md` regeneration reads (§9, plus per-file L0 extraction)
+- L0 sweep (§8) reads on the changed-files subset (typically 5–15)
+- 1 `improvements.md` read for cap check
+
+**Original total: ~80–110 file/scan operations per pass.**
+
+Rewritten:
+
+- 1 `housekeeping_scan` (covers §1 + §2 + §3 cap checks, dormant
+  domains, stale action items in one envelope)
+- 1 `glacier_index_compute` (covers §4)
+- 1 `link_audit` (covers §5)
+- 1 `entity_audit` (covers §5b + §5c)
+- 1 `link_index_compute` (covers §6)
+- 1 `session_brief` (orientation; supplies the domain list for §9)
+- ~6 × `domain_summary` (one per in-scope domain — needed for §2
+  hot-memory body, §3 birthday-scan fallback, and §9 INDEX.md
+  rebuild; collapsible to "only domains touched this pass" via the
+  `changed_recently[]` filter)
+- ~5–15 × `cog_outline` for L0 presence checks on changed files (§8)
+- a small handful of targeted `cog_read` calls for the residual
+  judgment passes (SSOT violations in §2, substantive-link confirmation
+  in §5, birthday-date extraction in §3) — typically 3–8
+
+**Rewritten total: ~20–35 RPC/read operations per pass.**
+
+Round-trip delta: **≈ 3–4× fewer fetches**, with the scan-every-file
+loops in §1, §3, §4, §5, §5b, §5c, §6 each collapsed into a single
+typed RPC and the per-domain INDEX rebuild bounded by `domain_summary`
+rather than N raw reads.
+
+---
+
 ## Gaps surfaced
 
 (Populated by the per-skill sections as they uncover needs the
@@ -445,4 +720,15 @@ this is a needs log for a later design pass.)
   RPC layer correctly doesn't cover them. Flagging so a future
   "project-fs" facade isn't accidentally rolled into the memory RPC
   surface.
-
+- **housekeeping: `birthday_scan(role, within_days)`** — §3 birthday
+  prep wants "entities with `birthday:` / `dob:` falling in the next N
+  days, with `interests` field returned for gift-idea synthesis."
+  `entity_audit` carries metadata-violation flags but does not parse
+  date fields or window them. Currently falls back to a full
+  `domain_summary("personal")` plus LLM date arithmetic.
+- **housekeeping: `l0_audit(role, scope?)`** — §8 wants "files missing
+  the `<!-- L0: ... -->` header, scoped to changed-recently or full
+  tree." No RPC enumerates this; current rewrite uses
+  `cog_outline` per candidate file, which works but is N round trips
+  on the changed subset. A bulk version would let the L0 sweep be a
+  single call before any patching.
