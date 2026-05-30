@@ -194,3 +194,47 @@ func containsTag(tags []string, want string) bool {
 	}
 	return false
 }
+
+// RecentObservationsForFile reads a single observations.md file at relPath and
+// returns parsed entries whose date is >= sinceDate (YYYY-MM-DD lexical compare).
+// sinceDate "" disables the filter. Missing file → (nil, nil). Single-file
+// helper kept for domain_summary; the multi-file aggregator is RecentObservations.
+func (s *MemoryStore) RecentObservationsForFile(relPath, sinceDate string) ([]ObservationEntry, error) {
+	abs, err := s.absPath(relPath)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Open(abs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("store: recent observations: %w", err)
+	}
+	defer f.Close()
+	if err := lockShared(f); err != nil {
+		return nil, fmt.Errorf("store: lock %q: %w", relPath, err)
+	}
+	defer unlock(f)
+
+	out := []ObservationEntry{}
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64*1024), 1<<20)
+	lineNo := 0
+	for scanner.Scan() {
+		lineNo++
+		trimmed := strings.TrimSpace(scanner.Text())
+		entry, ok := parseObservationLine("", relPath, lineNo, trimmed)
+		if !ok {
+			continue
+		}
+		if sinceDate != "" && entry.Date < sinceDate {
+			continue
+		}
+		out = append(out, entry)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("store: recent observations scan %q: %w", relPath, err)
+	}
+	return out, nil
+}

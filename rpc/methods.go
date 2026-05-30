@@ -413,6 +413,97 @@ func (srv *Server) handleRecentObservations(req Request) Response {
 	return okResponse(req.ID, result)
 }
 
+// --- cluster_check ---
+
+type clusterCheckParams struct {
+	baseParams
+	Domain         string `json:"domain,omitempty"`
+	MinClusterSize int    `json:"min_cluster_size,omitempty"`
+	Since          string `json:"since,omitempty"` // RFC3339 date, Go duration, or "Nd"
+	SpanDays       int    `json:"span_days,omitempty"`
+	SampleLimit    int    `json:"sample_limit,omitempty"`
+}
+
+func (srv *Server) handleClusterCheck(req Request) Response {
+	var p clusterCheckParams
+	if req.Params != nil {
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return errorResponse(req.ID, CodeInvalidParams, "cluster_check: invalid params: "+err.Error())
+		}
+	}
+	if p.Role == "" {
+		return errorResponse(req.ID, CodeInvalidParams, "cluster_check: role required")
+	}
+
+	var targets []store.ClusterObsTarget
+	if srv.controller != nil {
+		var ctrlTargets []domain.ActionTarget
+		if p.Domain != "" {
+			d, err := srv.controller.Get(p.Domain)
+			if err != nil {
+				return errorResponse(req.ID, CodeInvalidParams, "cluster_check: "+err.Error())
+			}
+			path, err := srv.controller.ResolveFile(d.ID, "observations")
+			if err != nil {
+				return errorResponse(req.ID, CodeInvalidParams, "cluster_check: "+err.Error())
+			}
+			ctrlTargets = []domain.ActionTarget{{Domain: d.ID, Path: path}}
+		} else {
+			ctrlTargets = srv.controller.Observations()
+		}
+		targets = make([]store.ClusterObsTarget, 0, len(ctrlTargets))
+		for _, t := range ctrlTargets {
+			// RBAC per-path on the source observations file.
+			if !srv.rbac.Check(p.Role, t.Path, "read") {
+				continue
+			}
+			targets = append(targets, store.ClusterObsTarget{Domain: t.Domain, Path: t.Path})
+		}
+	}
+
+	since, err := parseSince(p.Since, time.Now().UTC())
+	if err != nil {
+		return errorResponse(req.ID, CodeInvalidParams, "cluster_check: "+err.Error())
+	}
+
+	result, err := srv.store.Cluster(targets, store.ClusterParams{
+		MinClusterSize: p.MinClusterSize,
+		Since:          since,
+		SpanDays:       p.SpanDays,
+		SampleLimit:    p.SampleLimit,
+	})
+	if err != nil {
+		return errorResponse(req.ID, CodeStoreError, "cluster_check: "+err.Error())
+	}
+	return okResponse(req.ID, result)
+}
+
+// parseSince accepts an RFC3339 date/datetime, a Go duration string (e.g.
+// "168h"), or a shorthand like "7d" / "30d". Empty string means "use store
+// default" (zero time triggers the store's 7d default).
+func parseSince(raw string, now time.Time) (time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, nil
+	}
+	if strings.HasSuffix(raw, "d") {
+		var n int
+		if _, err := fmt.Sscanf(raw, "%dd", &n); err == nil && n > 0 {
+			return now.AddDate(0, 0, -n), nil
+		}
+	}
+	if d, err := time.ParseDuration(raw); err == nil {
+		return now.Add(-d), nil
+	}
+	if t, err := time.Parse("2006-01-02", raw); err == nil {
+		return t, nil
+	}
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		return t, nil
+	}
+	return time.Time{}, fmt.Errorf("invalid since %q (want RFC3339 date, duration, or Nd)", raw)
+}
+
 // --- domains.list / domains.get ---
 
 type domainsListParams struct {
@@ -521,7 +612,7 @@ type DomainSummaryResult struct {
 	HotMemory                 string              `json:"hot_memory"`
 	OpenActionCount           int                 `json:"open_action_count"`
 	CompletedActionCountSince int                 `json:"completed_action_count_since"`
-	RecentObservations        []store.Observation `json:"recent_observations"`
+	RecentObservations        []store.ObservationEntry `json:"recent_observations"`
 	FilesPresent              []string            `json:"files_present"`
 	LastActivity              string              `json:"last_activity"`
 	Since                     string              `json:"since"`
@@ -562,7 +653,7 @@ func (srv *Server) handleDomainSummary(req Request) Response {
 	result := DomainSummaryResult{
 		Domain:             d.ID,
 		Label:              d.Label,
-		RecentObservations: []store.Observation{},
+		RecentObservations: []store.ObservationEntry{},
 		FilesPresent:       []string{},
 		Since:              sinceDate,
 	}

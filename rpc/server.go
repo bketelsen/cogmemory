@@ -153,6 +153,8 @@ func (srv *Server) dispatch(line []byte) Response {
 		return srv.handleHousekeepingScan(req)
 	case "recent_observations":
 		return srv.handleRecentObservations(req)
+	case "cluster_check":
+		return srv.handleClusterCheck(req)
 	case "domains.list":
 		return srv.handleDomainsList(req)
 	case "domains.get":

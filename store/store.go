@@ -923,66 +923,11 @@ func parseOpenActionItem(domain, path string, line int, raw string) (OpenActionI
 }
 
 // Observation is one parsed entry from an observations.md file:
-// "- YYYY-MM-DD [tag1,tag2]: text".
-type Observation struct {
-	Date string   `json:"date"`
-	Tags []string `json:"tags"`
-	Text string   `json:"text"`
-}
-
-// obsParseRE captures (date, tags, text) from a validated observation line.
-var obsParseRE = regexp.MustCompile(`^-\s+(\d{4}-\d{2}-\d{2})\s+\[([^\]]+)\]:\s*(.+?)\s*$`)
-
-// RecentObservationsForFile reads relPath and returns parsed observations whose
-// date is >= sinceDate (YYYY-MM-DD lexical compare). sinceDate "" disables
-// the filter. Missing file → (nil, nil). Non-conforming lines are skipped.
-// Single-file scan helper used by domain_summary. The richer multi-file
-// aggregator with by_tag/by_domain support is RecentObservations() in
-// observations.go (the recent_observations RPC).
-func (s *MemoryStore) RecentObservationsForFile(relPath, sinceDate string) ([]Observation, error) {
-	abs, err := s.absPath(relPath)
-	if err != nil {
-		return nil, err
-	}
-	f, err := os.Open(abs)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("store: recent observations: %w", err)
-	}
-	defer f.Close()
-	if err := lockShared(f); err != nil {
-		return nil, fmt.Errorf("store: lock %q: %w", relPath, err)
-	}
-	defer unlock(f)
-
-	out := []Observation{}
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 64*1024), 1<<20)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		m := obsParseRE.FindStringSubmatch(line)
-		if m == nil {
-			continue
-		}
-		if sinceDate != "" && m[1] < sinceDate {
-			continue
-		}
-		var tags []string
-		for _, t := range strings.Split(m[2], ",") {
-			t = strings.TrimSpace(t)
-			if t != "" {
-				tags = append(tags, t)
-			}
-		}
-		out = append(out, Observation{Date: m[1], Tags: tags, Text: m[3]})
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("store: recent observations scan %q: %w", relPath, err)
-	}
-	return out, nil
-}
+// Observation, obsParseRE, RecentObservationsForFile —
+// removed. observations.go owns the canonical Observation parser
+// (ObservationEntry + parseObservationLine), and domain_summary now uses it
+// directly. RecentObservationsForFile shipped in PR #8 as a single-file
+// helper before observations.go landed; superseded.
 
 // addedDateRE — defined in housekeeping.go (same package). Reused here.
 
