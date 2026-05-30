@@ -165,6 +165,10 @@ func (srv *Server) dispatch(line []byte) Response {
 		return srv.handleDomainSummary(req)
 	case "entity_audit":
 		return srv.handleEntityAudit(req)
+	case "link_index_compute":
+		return srv.handleLinkIndexCompute(req)
+	case "link_audit":
+		return srv.handleLinkAudit(req)
 	case "health":
 		return srv.handleHealth(req)
 	case "git":
