@@ -667,6 +667,102 @@ Range: **~6–13 → ~2–4 round-trips**, roughly a 3× reduction on observatio
 
 ---
 
+## `reflect`
+
+Source: [cog-prime `.claude/commands/reflect.md`](https://github.com/marciopuga/cog/blob/main/.claude/commands/reflect.md). Self-improvement pass: ingest recent session transcripts, sweep for contradictions, consolidate observations into patterns, audit entities, surface synthesis opportunities, check scenario windows, then *act* — append self-observations, patch patterns, fix stale hot-memory. Writes go through cog-prime's normal channels; reads are where the round-trip cost lives.
+
+### 1. Original orientation block
+
+From `## Orientation (run FIRST, before any file reads)` (reflect.md lines 17–31):
+
+```bash
+# What changed since last run? Focus here.
+find memory/ -type f -name "*.md" -mtime -1 | sort
+
+# L0 summaries for all domains — quick routing without opening INDEX.md files
+grep -rn "<!-- L0:" memory/ --include="*.md" | grep -v glacier/ | sort
+
+# Entry counts for files approaching archival threshold
+grep -c "^- " memory/cog-meta/self-observations.md memory/personal/observations.md memory/*/observations.md memory/*/*/observations.md 2>/dev/null
+```
+
+Plus the `## Memory Files` block (lines 33–46) naming four files to open on activation (`reflect-cursor.md`, `self-observations.md`, `patterns.md`, `improvements.md`) and *referencing* "all domain observations, action-items, and hot-memory files" — i.e. fan-out scaled by domain count.
+
+Concrete shape on a 4-domain setup: **3 shell scans + 4 named cog-meta reads + 1 `domains.yml` read + ~12 domain-file reads (4 × {observations, action-items, hot-memory})** ≈ **~20 ops before the actual reflection work starts**.
+
+### 2. Rewritten orientation block
+
+Two RPC calls cover the orientation envelope:
+
+1. `session_brief(role="reflect")` → returns `hot_memory`, `patterns`, the full `domains` slice, and `action_counts` per domain. That's the L0 sweep (`<!-- L0:`-style routing) plus the domain manifest plus the cog-meta `patterns.md` body, all in one envelope. The driving field is **`domains`** — it replaces the `domains.yml` + L0-grep combo with a single typed list.
+2. `housekeeping_scan(role="reflect")` → `thresholds.observations_over_cap` enumerates which observation files are anywhere near archival; `changed_recently` collapses the `mtime -1` find. The driving fields are **`changed_recently`** (focus list) and **`thresholds.observations_over_cap`** (which files reflect's §3 consolidation will actually want to scan).
+
+Three direct `cog_read` calls remain because they're reflect's own continuity files and no RPC carries them: `cog-meta/reflect-cursor.md` (session-ingestion cursor — pure state), `cog-meta/self-observations.md` (read-then-append target, plus cap-enforcement at write time), `cog-meta/improvements.md` (read-then-triage target). `cog-meta/patterns.md` arrives via `session_brief`, so it does not need a separate read.
+
+Net: **~5–6 ops** (2 RPCs + 3 targeted reads) before reflection work begins, regardless of domain count.
+
+### 3. Original process steps involving memory reads
+
+§2 *Cross-Reference Memory & Consistency Sweep*:
+
+> "Hot-memory vs canonical sources: Read each domain's `hot-memory.md`. For every factual claim, read the canonical source file and verify."
+> "Cross-file fact check: Verify facts shared between files are consistent."
+> "Temporal validity check: Scan all `entities.md` files for `(since YYYY-MM)` / `(until YYYY-MM)` markers."
+> "Cross-domain entity check: If the same person appears in multiple `entities.md` files across domains, check for fact duplication."
+
+§3 *Consolidation Check + Hot-Memory Relevance*:
+
+> "Scan all `observations.md` files and `cog-meta/self-observations.md` for clusters of 3+ entries on the same theme/tag."
+
+§3b *Entity Registry Format Enforcement*:
+
+> "Scan all `entities.md` files for format compliance: 3-line max … status/last fields … cross-domain pointers."
+
+§3c *Detect Thread Candidates* + §3d *Proactive Synthesis Suggestions*:
+
+> "Scan observations for topics that appear across 3+ dates or span 2+ weeks."
+> "Gather observations — Read all `memory/*/observations.md` and `memory/*/*/observations.md` files. Filter to last 7 days. Cluster by domain. Cluster by topic."
+
+§3e *Scenario Feedback Loop*:
+
+> "Scan `memory/cog-meta/scenarios/` for active scenario files. For each scenario where today >= `check-by` date: read the scenario and its cited dependency files."
+
+Each bullet today is a fan-out: §2 fact-check is "N hot-memory reads × M canonical reads"; §3 / §3c / §3d each independently re-walk every `observations.md`; §3b independently re-walks every `entities.md`; §3e lists and reads scenarios. Trivially **20–40+ memory-touching ops** per reflect pass on a real install, almost all of them re-fetches of files the previous step already touched.
+
+### 4. Rewritten process steps
+
+- **§1 Review Recent Interactions** — Claude Code transcript ingestion. Pure project-fs work; no Cog RPC covers it (and shouldn't — transcripts live under `~/.claude/projects/`, not `memory/`). Cursor read at orientation (§2 above) supplies `last_processed`; cursor write at end is a normal write path. Unchanged.
+- **§2 Consistency Sweep** —
+  - "Hot-memory vs canonical" still requires reading each domain's hot-memory and the cited canonical files; the *files to verify* now come from `session_brief.domains` rather than a fresh `domains.yml` read, but the verification reads themselves stay LLM-judgment (which claim to verify, which file is canonical for it). No round-trip change on the verification reads themselves — the win is at orientation.
+  - "Temporal validity check" on entities → `entity_audit(role="reflect")` returns `temporal_violations` (`(until YYYY-MM)` markers with past dates needing strikethrough) and `format_violations` directly. Replaces the per-file regex scan.
+  - "Cross-domain entity duplication check" → `entity_audit` enumerates entries per path; the LLM still decides which duplicates are legitimately domain-scoped vs. genuine drift, but no extra reads are needed to *find* them.
+- **§3 Consolidation** + **§3c Thread Candidates** + **§3d Synthesis Opportunities** — `cluster_check(role="reflect", min_cluster_size=3, since="7d")` returns `by_tag`, `by_keyword`, and `thread_candidates` in one envelope. All three sub-passes collapse into one call. Per RPC-CONSOLIDATION.md §8, this is exactly the consumer the RPC was designed for; reflect's §3/§3c/§3d are *the* worked example. Per-cluster pattern-distillation writes (`cog_patch` on `cog-meta/patterns.md` or domain `patterns.md`) remain unchanged.
+- **§3b Entity Registry Format Enforcement** — `entity_audit(role="reflect")` returns `format_violations` (3-line overflow with `has_detail_file` flag), `missing_metadata` (`status` / `last` gaps), and `glacier_candidates` in one call. Replaces N entity-file scans. Per-violation `cog_patch` writes unchanged.
+- **§3e Scenario Feedback Loop** — `scenario_check(role="reflect")` returns the schedule slice (`due_now` / `overdue` / `active`, `days_until_check`). Assumption-verification on `due_now` / `overdue` scenarios stays LLM (reads cited dependency files and reasons). RPC-CONSOLIDATION.md §10 explicitly calls this out as the right split.
+- **§4 Assess Performance**, **§5 Act on Findings**, **§6 Debrief** — pure write-and-judgment paths. `cog_append` to `self-observations.md` (with the §5 cap of "max 5 per pass" enforced by the LLM), `cog_patch` on `patterns.md` and `improvements.md`, `cog_patch` on stale hot-memory entries. Unchanged.
+
+### 5. LLM-judgment-preserved callout
+
+The rewrite eliminates orientation and enumeration scans, *not* judgment. These stay LLM-owned:
+
+- **Transcript ingestion (§1).** Reading `*.jsonl` session files and extracting unresolved threads, broken promises, repeated friction, missed cues — pattern recognition over conversational prose. No RPC can do this; it's the core of the skill.
+- **Hot-memory vs. canonical fact verification (§2).** RPCs don't know which file is canonical for which claim, and "canonical file always wins" requires the LLM to decide *what* the contradiction is, not just *that* there is one.
+- **Cluster acting (§3).** `cluster_check` surfaces what's clustering; the decision "is this a timeless rule worth distilling into `patterns.md`?" vs. "is this a temporal blip?" stays with the model. Same for §3c thread promotion — `thread_candidates` is a suggestion list, never an auto-action.
+- **Entity flag triage (§3b).** Format violations are mechanical; *fixing* them — compress in place, promote to detail file, or flag for user review when health/family-sensitive — is judgment. Reflect's "do NOT auto-fix health or family-sensitive facts" rule is an LLM-side guard, not an RPC parameter.
+- **Scenario assumption-check (§3e).** Whether an assumption has broken is reading prose and reasoning. RPC just tells you which scenarios are due.
+- **§4 honest self-assessment + §5 hot-memory promote/demote + §6 debrief composition.** Quality, calibration, narrative — all LLM.
+- **Self-observation cap enforcement (§5).** "Max 5 per reflect pass — merge lower-signal ones." Prioritization is judgment; the cap is policy.
+
+### 6. Round-trip delta
+
+Before: **~20–40+ memory-touching ops per run** — orientation (~20 on a 4-domain setup) + §2 verify-fan-out + §3 / §3b / §3c / §3d each independently re-walking observations and entities + §3e scenario fan-out. Scales linearly with domain count.
+
+After: **~10–14 ops per run** — orientation (2 RPCs + 3 targeted reads) + §2 verification reads (LLM-selected, only the files actually being fact-checked) + 1 `cluster_check` (§3 + §3c + §3d combined) + 1 `entity_audit` (§3b temporal/format/duplicate combined) + 1 `scenario_check` (§3e) + the cited-dependency reads for scenarios that are actually `due_now` / `overdue`.
+
+Range: **~20–40 → ~10–14 round-trips**, with the domain-count scaling cliff removed from orientation, §3, §3b, §3c, §3d simultaneously. The remaining variance is exactly the cited-file verification work in §2 and §3e — which is judgment, not enumeration, and correctly stays LLM-driven.
+
+---
+
 ## Gaps surfaced
 
 (Populated by the per-skill sections as they uncover needs the
