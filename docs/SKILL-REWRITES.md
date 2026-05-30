@@ -668,6 +668,87 @@ Round-trip delta: **~14 → ~5–6 round-trips, roughly a 3× reduction** with n
 
 ---
 
+## history
+
+Source: <https://github.com/marciopuga/cog/blob/main/.claude/commands/history.md>
+
+Deep recursive search across all memory files to reconstruct a narrative from a natural-language query.
+
+> Note: `history` is the worst fit in the catalog for RPC consolidation. It is deliberately free-form ("piece together a narrative from multiple entries"). The current RPC vocabulary targets *structured* scans (counts, thresholds, clusters), not arbitrary substring search. The rewrite below collapses what it can; the rest stays prose, and the missing primitive (`memory_search`) is recorded under Gaps.
+
+### 1. Original orientation block
+
+From `## Memory Files`:
+
+> Read on activation:
+> - `memory/hot-memory.md` (for context on what's currently relevant)
+
+One read; trivial. Drives only "what frame is the user in right now."
+
+### 2. Rewritten orientation block
+
+```
+session_brief(role) → { hot_memory, patterns, domains, action_counts, ... }
+```
+
+One call. `hot_memory` is the field that drives query framing ("are we mid-incident? mid-sprint?"); `domains[].id` is the field that drives Pass-1 scoping when the query is obviously domain-shaped (e.g. "history of the kanban DB corruption" → restrict to `work`-ish domains). Global hot-memory is usually already in hand from the session-start brief, so on most invocations this is effectively free.
+
+### 3. Original process steps involving memory reads
+
+> ### Pass 1: Locate
+> - Extract keywords from the user's query (names, topics, dates, phrases)
+> - `Grep path="memory/" pattern="<keyword>"` for each keyword
+> - Note which files matched and how many hits
+> - If >10 files match, narrow by domain or add query terms
+> - If 0 matches, try synonyms or related terms
+> - Check `memory/glacier/index.md` for archived data matching the query
+>
+> ### Pass 2: Extract
+> - Read the top 3-5 most relevant files (by hit density and recency)
+> - Extract the specific passages that match the query
+> - Track the timeline: when did the topic first come up? How did it evolve?
+>
+> ### Pass 3: Synthesize
+> - Combine extracted passages into a coherent answer
+> - Present findings chronologically with dates
+
+Pass 1 is N keyword greps across the whole tree (N ≈ 3–8). Pass 2 is 3–5 targeted file reads. Pass 3 is pure LLM.
+
+### 4. Rewritten process steps
+
+**Pass 1 — Locate.** No single RPC covers "grep across all memory files." Three partial substitutes exist; pick by query shape, then fall back to free-text search for the residual:
+
+- *Observation-shaped* (events, dated entries, tag-driven): call `recent_observations(role, since=<wide window>, by_tag?=<extracted tag>, by_domain?=<from session_brief>)`. The returned `by_domain` / `by_tag` aggregates tell you where to focus; the `entries[]` array already carries `{path, line, date, tags, text}` — that is most of Pass 2's payload for free, no extra read needed.
+- *Entity-shaped* (a person, an org, a project): call `entity_audit(role)` once and inspect the returned `name` set across all `entities.md` files. This maps the entity to its canonical home before any read.
+- *Glacier-shaped* ("did we ever…", "back when…"): **no RPC** covers glacier search (see Gaps). Fall back to `cog_read("glacier/index.md")` + a targeted `cog_read` of the matching slab — kept as prose, not collapsed.
+- *Otherwise* (true free text): fall back to `cog_search(query)`. Treat its hits the same way you'd treat the `recent_observations` `entries[]` array — but expect less enrichment (see Gaps).
+
+**Pass 2 — Extract.** If Pass 1 used `recent_observations` or returned a sufficient `cog_search` snippet, the matching passages are already in hand; skip the per-file `cog_read` loop. If the query needed glacier or entity drill-down, do at most one targeted `cog_read(path, section?)` per hit. Use `cog_outline(path)` first when the file is large and you only need one heading.
+
+**Pass 3 — Synthesize.** Pure LLM; unchanged.
+
+**Writes (prose, not RPC-collapsed).** When synthesis surfaces a gap ("found references to X in observations but no entity entry"), the follow-up is a `cog_append` to `entities.md` or a `cog_patch` of `action-items.md`. Already one call each; not a round-trip win to wrap.
+
+### 5. LLM-judgment-preserved callout
+
+The daemon never decides any of the following; they remain entirely with the LLM:
+
+- **Keyword extraction** from the user's natural-language query, including synonym and near-miss reformulation when the first pass returns zero hits.
+- **Query-shape classification** — observation / entity / glacier / free-text — and therefore which RPC to call. No RPC infers shape.
+- **Top-N hit selection** from a noisy result set: hit density vs. recency vs. domain relevance is a judgment call.
+- **Narrative construction**: chronological assembly, evolution-over-time framing, "first mentioned on … last touched on …" arcs.
+- **Gap flagging**: surfacing "referenced but not in memory — want me to create an entity?" prompts.
+
+### 6. Round-trip delta
+
+Before: **~6–13 round-trips** on a typical query (3–8 keyword greps in Pass 1 + 3–5 file reads in Pass 2) before synthesis. Heavy queries with synonym retries push this higher.
+
+After: **~2–4 round-trips** — 1 `session_brief` (often already cached from session start, so effectively free) + 1 shape-appropriate RPC (`recent_observations` / `entity_audit` / `cog_search`) that frequently returns enough text to skip Pass 2 entirely, plus 0–2 targeted `cog_read` / `cog_outline` for glacier drill-down.
+
+Range: **~6–13 → ~2–4 round-trips**, roughly a 3× reduction on observation- and entity-shaped queries. **The win narrows on true free-text queries** (no obvious shape): there `cog_search` replaces the per-keyword fan-out with one call, but without the domain/tag/date enrichment a dedicated `memory_search` RPC would provide, the LLM still does extra work reconstructing context from flat hits. `history` therefore benefits less from this consolidation round than the structured-scan skills (`setup`, `scenario`, `evolve`, `housekeeping`) and is the strongest case in the catalog for adding `memory_search` in a future round.
+
+---
+
 ## Gaps surfaced
 
 (Populated by the per-skill sections as they uncover needs the
@@ -692,3 +773,5 @@ this is a needs log for a later design pass.)
   `cog_outline` per candidate file, which works but is N round trips
   on the changed subset. A bulk version would let the L0 sweep be a
   single call before any patching.
+- **history: `memory_search(role, query, since?, by_domain?, by_tag?, limit?)`** — unified full-text search across all memory files (observations, entities, action-items, hot-memory, glacier) with hit-density + recency ranking, returning pre-computed `{path, line, date, snippet, domain, tags}` records. `cog_search` exists but returns flat hits without the domain/tag/date enrichment that `history` Pass 1 currently builds by hand from grep output. Without this, `history` is the worst-served skill in the catalog: free-text queries still require the LLM to walk hits back to file paths and infer recency/domain context one by one.
+- **history: `glacier_search(role, query)`** — targeted search inside archived slabs without rehydrating them all. Currently requires reading `glacier/index.md` and guessing which slab to crack open based on slab summaries alone.
