@@ -792,6 +792,58 @@ func (srv *Server) handleEntityAudit(req Request) Response {
 	return okResponse(req.ID, res)
 }
 
+// --- link_index_compute ---
+
+type linkIndexComputeParams struct {
+	baseParams
+}
+
+func (srv *Server) handleLinkIndexCompute(req Request) Response {
+	var p linkIndexComputeParams
+	if req.Params != nil {
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return errorResponse(req.ID, CodeInvalidParams, "link_index_compute: invalid params: "+err.Error())
+		}
+	}
+	if p.Role == "" {
+		return errorResponse(req.ID, CodeInvalidParams, "link_index_compute: role required")
+	}
+	canRead := func(path string) bool { return srv.rbac.Check(p.Role, path, "read") }
+	links, err := srv.store.LinkIndexFiltered(canRead)
+	if err != nil {
+		return errorResponse(req.ID, CodeStoreError, "link_index_compute: "+err.Error())
+	}
+	return okResponse(req.ID, map[string]interface{}{
+		"links": links,
+	})
+}
+
+// --- link_audit ---
+
+type linkAuditParams struct {
+	baseParams
+}
+
+func (srv *Server) handleLinkAudit(req Request) Response {
+	var p linkAuditParams
+	if req.Params != nil {
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return errorResponse(req.ID, CodeInvalidParams, "link_audit: invalid params: "+err.Error())
+		}
+	}
+	if p.Role == "" {
+		return errorResponse(req.ID, CodeInvalidParams, "link_audit: role required")
+	}
+	canRead := func(path string) bool { return srv.rbac.Check(p.Role, path, "read") }
+	candidates, err := srv.store.LinkAudit(canRead)
+	if err != nil {
+		return errorResponse(req.ID, CodeStoreError, "link_audit: "+err.Error())
+	}
+	return okResponse(req.ID, map[string]interface{}{
+		"candidates": candidates,
+	})
+}
+
 // --- health ---
 
 func (srv *Server) handleHealth(req Request) Response {
