@@ -142,127 +142,6 @@ cost scaled with the number of existing domains.
 
 ---
 
----
-
-## `setup`
-
-Source: https://github.com/marciopuga/cog/blob/main/.claude/commands/setup.md
-
-### 1. Original orientation block
-
-The skill has no explicit "read X first" preamble. Its orientation is
-implicit and re-run-only: when invoked on an existing install it must
-discover the current manifest and on-disk state before asking the user
-what to add. In cog-prime that means an ad-hoc combination of:
-
-> "Read `memory/domains.yml`" (to know what already exists)
-> "List `~/.claude/projects/` and find the directory that matches this
-> project's path" (Phase 3d, transcript discovery)
-> Implicit `ls memory/{domain.path}/` to decide which starter files
-> are missing (Phase 3b, "create … if it doesn't exist")
-> Implicit `ls .claude/commands/` to decide which command files need
-> (re)writing (Phase 3c)
-
-Round-trips on a re-run: 1 YAML read + N directory listings + 1
-transcripts dir listing ≈ 3–8 filesystem calls before the conversation
-can resume.
-
-### 2. Rewritten orientation block
-
-A single RPC covers the manifest half of the discovery:
-
-- `domain_summary(role="setup", domain="*")` — or, more cheaply,
-  consume the `domains` slice already returned by
-  `session_brief(role="setup")`. The driving field is the **list of
-  `id`s already present**: it tells the skill whether this is a fresh
-  install ("no domains yet → run full Phase 1") or a re-run ("ask
-  'add more or reconfigure?'", Rule 5).
-
-For each existing domain, the same `domain_summary` response carries
-`files_present[]`, which drives Phase 3b's "create if missing" loop
-without a per-domain `ls`.
-
-Transcript-path discovery (`~/.claude/projects/<slug>`) has no RPC
-analogue — it inspects the Claude Code install, not Cog memory — so it
-stays as a one-shot filesystem call. Called out under "Gaps surfaced".
-
-### 3. Original process steps involving memory reads
-
-Setup is overwhelmingly a *write* skill. The few read-shaped steps are:
-
-> Phase 3a: "Write the complete manifest file." — implicitly requires
-> reading the prior `domains.yml` so cog-meta and untouched entries
-> are preserved across re-runs.
->
-> Phase 3b: "For each file in the domain's `files` array, create
-> `memory/{domain.path}/{file}.md` **if it doesn't exist**." — requires
-> a directory listing per domain.
->
-> Phase 3c: "If the file already exists, overwrite it (the template is
-> the source of truth)." — no read needed, but the loop is bounded by
-> the manifest's domain list, which must first be in hand.
->
-> Phase 3e: "Read `CLAUDE.md`. Find the domain routing table … Keep
-> all non-domain rows … as-is" — single file read, no rewrite.
-
-### 4. Rewritten process steps
-
-| Phase | Original shape | Rewritten shape |
-|---|---|---|
-| 1 — Discovery (conversational) | unchanged | unchanged (LLM-driven dialogue) |
-| 2 — Confirm summary | unchanged | unchanged (LLM-formatted prose) |
-| 3a — Write `domains.yml` | read prior YAML + write new | `session_brief(role="setup")` provides current manifest in-band → render new YAML → single write call (no RPC; write path stays prose per guardrails) |
-| 3b — Create starter files | per-domain `ls` + per-file create | for each domain, consume `files_present[]` from the same `session_brief`/`domain_summary` payload; write only the diff. Writes remain prose. |
-| 3c — Generate command files | read template + write per domain | unchanged — template read is one-shot and command-file writes are unconditional ("overwrites the file") so no read is needed at all. |
-| 3d — Discover session transcript path | `ls ~/.claude/projects/` + write `reflect-cursor.md` | unchanged — outside Cog memory; see "Gaps surfaced". |
-| 3e — Update `CLAUDE.md` routing table | read CLAUDE.md + regenerate domain rows | unchanged — `CLAUDE.md` is a project file, not Cog memory; no RPC applies. |
-| 4 — Summary | unchanged | unchanged. |
-
-The net effect: the 3–8 startup reads collapse into a single
-`session_brief` call, and the per-domain "does this file exist?" check
-disappears entirely.
-
-### 5. LLM-judgment-preserved callout
-
-The whole *point* of `setup` is conversational synthesis — that work
-stays with the model:
-
-- **Domain inference from a free-form interview** (Phase 1): mapping
-  "I run a side project called myapp, my wife and I have two kids,
-  I'm a designer at Acme" into `personal` + `acme` (work) + `myapp`
-  (side-project), plus customized `files` lists ("kids → add
-  `school`", "health condition → add `health`").
-- **Trigger keyword inference** for each domain (company names,
-  project names, colleague names).
-- **The Phase 2 confirmation rewrite** — restating the proposed
-  manifest in plain English so the user can sanity-check before any
-  file is touched.
-- **Re-run reconciliation judgment** (Rule 5 + Rule 2): deciding
-  whether the user wants to add a domain, rename one, or merge
-  observations into a renamed path — the RPC can list what's there,
-  but only the LLM can interpret intent.
-
-### 6. Round-trip delta
-
-- **Current**: ~3–8 filesystem round-trips at orientation on a re-run
-  (1 `domains.yml` read + 1 transcripts dir listing + N per-domain
-  `ls` calls for the "create if missing" loop + 1 `CLAUDE.md` read).
-  Fresh installs are ~1–2 (transcripts listing + `CLAUDE.md` read).
-- **Rewritten**: **1 RPC** (`session_brief`) + 1 unavoidable
-  filesystem read each for the transcripts directory and `CLAUDE.md`,
-  both of which sit outside Cog memory. Fresh installs are the same 1
-  RPC + 2 reads.
-- **Delta**: 3–8 → ~1 inside Cog memory; total round-trips drop to a
-  flat **~3** regardless of install size.
-
-This skill is, and stays, write-dominated; the rewrite's value is
-small in absolute terms but eliminates the only place where setup's
-cost scaled with the number of existing domains.
-
----
-
----
-
 ## `scenario`
 
 Source: https://github.com/marciopuga/cog/blob/main/.claude/commands/scenario.md
@@ -705,6 +584,87 @@ Round-trip delta: **≈ 3–4× fewer fetches**, with the scan-every-file
 loops in §1, §3, §4, §5, §5b, §5c, §6 each collapsed into a single
 typed RPC and the per-domain INDEX rebuild bounded by `domain_summary`
 rather than N raw reads.
+
+---
+
+## scenario
+
+Source: <https://github.com/marciopuga/cog/blob/main/.claude/commands/scenario.md>
+
+Decision-modeling skill: take a decision point, branch into 2–3 paths, ground each in real memory data, map dependencies + timelines + canary signals, and write to `cog-meta/scenarios/{slug}.md`.
+
+### 1. Original orientation block
+
+From `## Memory Files`:
+
+> Read based on scenario topic — this is focused, not a broad scan:
+> - `memory/hot-memory.md` (cross-domain strategic context)
+> - `memory/personal/calendar.md` (upcoming timeline for overlay)
+> - `memory/personal/action-items.md` (existing commitments, constraints)
+> - Work domain action-items (read `memory/domains.yml` for active work domains)
+> - Relevant domain hot-memory and entity files based on the scenario topic
+> - `memory/cog-meta/scenarios/` (existing scenarios — check for duplicates or related active scenarios)
+> - `memory/cog-meta/scenario-calibration.md` (past accuracy — calibrate confidence accordingly)
+
+Concrete shape on a 3-domain-topic with ~4 active scenarios: 1 hot-memory read + 2 personal reads (calendar, action-items) + 1 `domains.yml` read + ~3D domain-file reads (hot-memory, action-items, entities per topic-relevant domain) + 1 `cog-meta/scenarios/` listing + ~4 scenario-file reads to dedupe + 1 calibration read ≈ **~14 reads** before any branching work begins.
+
+### 2. Rewritten orientation block
+
+Two RPC calls cover the same ground:
+
+1. `scenario_check(role)` → `{scenarios: [{path, check_by, status, days_until_check}, …]}`. The **`path`** + **`status`** fields drive dedupe ("is this decision already an active scenario?") and contingency framing ("is this related to one due now?"). Replaces the `cog-meta/scenarios/` listing + per-file dedupe reads.
+2. For each domain D the user's prompt touches, `domain_summary(role, D, since="7d")` → `{hot_memory, open_action_count, recent_observations, files_present, …}`. The **`hot_memory`** body + **`recent_observations`** array feed dependency mapping; **`open_action_count`** is the early-exit signal ("decision is already committed, don't scenario it"). Replaces the per-domain hot-memory + action-items + entities reads plus the `domains.yml` lookup.
+
+Two reads stay as direct file fetches (no RPC, called out per the guardrails):
+
+- `cog-meta/scenario-calibration.md` — confidence-calibration source. Single file, low frequency. **Direct read.**
+- `personal/calendar.md` — week-grain calendar overlay. **Direct read.**
+
+The global `memory/hot-memory.md` drops out: the session-start `session_brief` call (run once per conversation) already returned it.
+
+### 3. Original process steps involving memory reads
+
+§2 Dependency Mapping:
+
+> Read across memory files to identify what this decision depends on and what depends on it. **Upstream dependencies** (things that constrain the decision): Calendar events, deadlines, commitments from action-items; Other people's states/decisions from entities; Health, financial, or logistical constraints; Active scenarios that overlap. **Downstream consequences** […]. Every dependency must cite its source file: `[[personal/calendar]]`, `[[work/acme/action-items]]`, etc.
+
+§4 Timeline Overlay:
+
+> Map each branch's key events against the actual calendar. Cross-reference `calendar.md` for recurring routines.
+
+§6 Write Scenario File:
+
+> Write to `memory/cog-meta/scenarios/{slug}.md`: […]
+
+`Activation`:
+
+> Read scenario-calibration.md first (if it exists) for past accuracy. Then read the relevant memory files for the scenario topic.
+
+### 4. Rewritten process steps
+
+- **§2 Dependency Mapping** — the per-domain hot-memory / action-items / entities reads collapse into the `domain_summary` calls already made in orientation; upstream dependencies come from each domain's `hot_memory` + `recent_observations`, downstream consequences from `open_action_count` + the same observations. Overlap with active scenarios comes from the `scenario_check` `path` list. Wiki-link citations (`[[personal/calendar]]`, etc.) are unchanged — the rewrite reduces *fetches*, not the citation convention.
+- **§4 Timeline Overlay** — `calendar.md` stays a direct read. The cross-reference work itself is LLM reasoning, not retrieval.
+- **§6 Write Scenario File** — single `cog_write` to `cog-meta/scenarios/{slug}.md`. Already a single call; not a rewrite target per the doc-level guardrails.
+- **Assumption verification** (when `/reflect` later checks the scenario) — explicitly **no RPC**. Per RPC-CONSOLIDATION.md §10: *"Just the schedule — assumption-verification is read-and-reason work that stays with the LLM."* This stays prose: the agent reads the scenario file, walks each `**Assumptions**` line, and verifies against current memory using whatever RPCs fit those specific facts (typically `domain_summary` + `recent_observations`).
+
+### 5. LLM-judgment-preserved callout
+
+The daemon never decides any of the following; they remain entirely with the LLM:
+
+- Whether an input clears the **fork / stakes / uncertainty / time-sensitivity** bar (§1) — `scenario_check` reports schedule, not worthiness.
+- Which 2–3 **branches** to generate and which non-obvious path to include (§3).
+- **Canary signal** selection — the earliest observable indicator per branch (§5).
+- **Confidence calibration** against `scenario-calibration.md` — reading the file is mechanical, weighting confidence on a new scenario is judgment.
+- **Assumption verification** at check-by time — see §4. Schedule is RPC; verification is reasoning.
+- **Anti-pattern enforcement** — declining to scenario obvious decisions, already-decided items, or recurring routines.
+
+### 6. Round-trip delta
+
+Before: **~14 reads** in orientation on a 3-domain-topic with ~4 active scenarios (1 hot-memory + 2 personal + 1 `domains.yml` + 9 domain files + 1 listing + ~4 scenario reads + 1 calibration), plus per-branch follow-ups during dependency mapping that re-touch the same files.
+
+After: **~5 calls** in orientation (`scenario_check` + 3× `domain_summary` + 1 direct read of `scenario-calibration.md`) plus 1 direct read of `calendar.md` during timeline overlay. Global hot-memory comes free from `session_brief`.
+
+Round-trip delta: **~14 → ~5–6 round-trips, roughly a 3× reduction** with no change to skill semantics.
 
 ---
 
