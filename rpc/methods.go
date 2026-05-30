@@ -399,6 +399,38 @@ func (srv *Server) handleDomainsGet(req Request) Response {
 	})
 }
 
+// --- glacier_index_compute ---
+
+type glacierIndexParams struct {
+	baseParams
+}
+
+func (srv *Server) handleGlacierIndexCompute(req Request) Response {
+	var p glacierIndexParams
+	if req.Params != nil {
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return errorResponse(req.ID, CodeInvalidParams, "glacier_index_compute: invalid params: "+err.Error())
+		}
+	}
+	if p.Role == "" {
+		return errorResponse(req.ID, CodeInvalidParams, "glacier_index_compute: role required")
+	}
+	all, err := srv.store.GlacierIndex()
+	if err != nil {
+		return errorResponse(req.ID, CodeStoreError, "glacier_index_compute: "+err.Error())
+	}
+	filtered := make([]store.GlacierEntry, 0, len(all))
+	for _, e := range all {
+		if srv.rbac.Check(p.Role, e.Path, "read") {
+			filtered = append(filtered, e)
+		}
+	}
+	return okResponse(req.ID, map[string]interface{}{
+		"entries": filtered,
+		"count":   len(filtered),
+	})
+}
+
 // --- health ---
 
 func (srv *Server) handleHealth(req Request) Response {

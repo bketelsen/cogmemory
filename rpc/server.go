@@ -151,6 +151,8 @@ func (srv *Server) dispatch(line []byte) Response {
 		return srv.handleDomainsList(req)
 	case "domains.get":
 		return srv.handleDomainsGet(req)
+	case "glacier_index_compute":
+		return srv.handleGlacierIndexCompute(req)
 	case "health":
 		return srv.handleHealth(req)
 	case "git":

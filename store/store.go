@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+	"gopkg.in/yaml.v3"
 )
 
 // obsLineRE validates observation format: "- YYYY-MM-DD [tags]: text"
@@ -72,6 +73,18 @@ type StatsResult struct {
 	Lines   int64       `json:"lines"`
 	Size    int64       `json:"size"`
 	PerFile []FileStats `json:"per_file"`
+}
+
+// GlacierEntry describes one archived glacier file with its YAML frontmatter
+// metadata. Tags is always a non-nil slice in JSON output.
+type GlacierEntry struct {
+	Path      string   `json:"path"`
+	Domain    string   `json:"domain,omitempty"`
+	Type      string   `json:"type,omitempty"`
+	Tags      []string `json:"tags"`
+	DateRange string   `json:"date_range,omitempty"`
+	Entries   int      `json:"entries,omitempty"`
+	Summary   string   `json:"summary,omitempty"`
 }
 
 // MemoryStore provides file-based memory operations rooted at a directory.
@@ -921,6 +934,123 @@ func lockExclusive(f *os.File) error {
 // unlock releases the advisory lock on f.
 func unlock(f *os.File) {
 	_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
+}
+
+// GlacierIndex walks glacier/**/*.md, parses YAML frontmatter, and returns
+// one entry per file sorted by path. Files without parseable frontmatter still
+// appear in the index (with only Path set) so the caller can spot orphans.
+// Returns an empty slice (not nil) when the glacier directory is absent.
+func (s *MemoryStore) GlacierIndex() ([]GlacierEntry, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	glacierRoot := filepath.Join(s.root, "glacier")
+	info, err := os.Stat(glacierRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []GlacierEntry{}, nil
+		}
+		return nil, fmt.Errorf("store: glacier index: %w", err)
+	}
+	if !info.IsDir() {
+		return []GlacierEntry{}, nil
+	}
+
+	entries := []GlacierEntry{}
+	walkErr := filepath.WalkDir(glacierRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".md") {
+			return nil
+		}
+		if strings.HasSuffix(path, ".tmp") {
+			return nil
+		}
+		relPath, _ := filepath.Rel(s.root, path)
+		relPath = filepath.ToSlash(relPath)
+		entry := GlacierEntry{Path: relPath, Tags: []string{}}
+
+		f, openErr := os.Open(path)
+		if openErr != nil {
+			entries = append(entries, entry)
+			return nil
+		}
+		_ = lockShared(f)
+		data, readErr := io.ReadAll(f)
+		unlock(f)
+		f.Close()
+		if readErr != nil {
+			entries = append(entries, entry)
+			return nil
+		}
+
+		fm, ok := extractFrontmatter(data)
+		if ok {
+			var parsed struct {
+				Domain    string   `yaml:"domain"`
+				Type      string   `yaml:"type"`
+				Tags      []string `yaml:"tags"`
+				DateRange string   `yaml:"date_range"`
+				Entries   int      `yaml:"entries"`
+				Summary   string   `yaml:"summary"`
+			}
+			if yaml.Unmarshal(fm, &parsed) == nil {
+				entry.Domain = parsed.Domain
+				entry.Type = parsed.Type
+				if parsed.Tags != nil {
+					entry.Tags = parsed.Tags
+				}
+				entry.DateRange = parsed.DateRange
+				entry.Entries = parsed.Entries
+				entry.Summary = parsed.Summary
+			}
+		}
+		entries = append(entries, entry)
+		return nil
+	})
+	if walkErr != nil {
+		return nil, fmt.Errorf("store: glacier index: %w", walkErr)
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
+	return entries, nil
+}
+
+// extractFrontmatter pulls the YAML block delimited by leading "---" / "---"
+// from a markdown file body. Returns (nil, false) if no frontmatter is present.
+// A leading HTML comment line (e.g. "<!-- L0: ... -->") is skipped so files
+// that prepend an L0 hint to their frontmatter still parse.
+func extractFrontmatter(data []byte) ([]byte, bool) {
+	text := string(data)
+	text = strings.TrimPrefix(text, "\ufeff")
+	lines := strings.Split(text, "\n")
+	i := 0
+	for i < len(lines) && strings.TrimSpace(lines[i]) == "" {
+		i++
+	}
+	if i < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[i]), "<!--") &&
+		strings.HasSuffix(strings.TrimSpace(lines[i]), "-->") {
+		i++
+	}
+	for i < len(lines) && strings.TrimSpace(lines[i]) == "" {
+		i++
+	}
+	if i >= len(lines) || strings.TrimSpace(lines[i]) != "---" {
+		return nil, false
+	}
+	start := i + 1
+	for j := start; j < len(lines); j++ {
+		if strings.TrimSpace(lines[j]) == "---" {
+			return []byte(strings.Join(lines[start:j], "\n")), true
+		}
+	}
+	return nil, false
 }
 
 // Git runs a git operation in the memory root directory.
