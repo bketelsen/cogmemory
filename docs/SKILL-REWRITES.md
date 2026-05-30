@@ -1,141 +1,156 @@
-# SKILL-REWRITES
+# Cog-Prime Skill Rewrites — Translation Table
 
-Translation table mapping each cog-prime skill's memory-orientation and process steps
-onto the consolidated RPC vocabulary from [`docs/RPC-CONSOLIDATION.md`](./RPC-CONSOLIDATION.md).
+Round-trip-by-round-trip translation of the cog-prime skill bodies
+(https://github.com/marciopuga/cog/blob/main/.claude/commands/) into the
+RPC vocabulary proposed in [RPC-CONSOLIDATION.md](./RPC-CONSOLIDATION.md).
 
-Each section covers one cog-prime command from
-[`marciopuga/cog`](https://github.com/marciopuga/cog/tree/main/.claude/commands).
-The goal is to show, concretely, where the new RPCs collapse multi-file shell scans
-into a single envelope call — and where prose / LLM judgment still rules.
+One section per cog-prime command. Each section follows a fixed
+six-part shape:
 
-Sections are independent and append-only. Cards add their own section without
-touching others. New unmet needs go in the **Gaps surfaced** section at the bottom.
+1. Original orientation block (shell scans / file reads, quoted)
+2. Rewritten orientation block (1–2 RPC calls; named driving fields)
+3. Original process steps that involve memory reads (quoted)
+4. Rewritten process steps (RPCs where they exist; prose where they
+   don't — writes and scenario-style assumption checks stay LLM)
+5. LLM-judgment-preserved callout — what *must* stay with the model
+6. Round-trip delta — current N vs rewritten N (range OK)
+
+**Guardrails (apply to every section):**
+- No new RPCs are proposed here. Anything the existing vocabulary
+  can't cover goes into the "Gaps surfaced" section at the bottom.
+- Write paths are not rewritten — they're already single calls.
+- Skill *meaning* is preserved; only the data-access shape changes.
+- Cog-prime's section structure is kept; this is a translation, not
+  a redesign.
 
 ---
 
-## foresight
+## `setup`
 
-Source: [`.claude/commands/foresight.md`](https://github.com/marciopuga/cog/blob/main/.claude/commands/foresight.md)
-Purpose: cross-domain strategic synthesis — read broadly, write **one** nudge to
-`memory/cog-meta/foresight-nudge.md`.
+Source: https://github.com/marciopuga/cog/blob/main/.claude/commands/setup.md
 
 ### 1. Original orientation block
 
-Quoted verbatim from cog-prime — pure file enumeration:
+The skill has no explicit "read X first" preamble. Its orientation is
+implicit and re-run-only: when invoked on an existing install it must
+discover the current manifest and on-disk state before asking the user
+what to add. In cog-prime that means an ad-hoc combination of:
 
-> 1. Read `memory/domains.yml` to discover all active domains
-> 2. For each domain, read `hot-memory.md` and `action-items.md` (if they exist)
-> 3. Also read:
->    - `memory/hot-memory.md` (cross-domain strategic context)
->    - `memory/personal/entities.md` (upcoming birthdays, relationships)
->    - `memory/personal/calendar.md` (what's coming up)
->    - `memory/personal/health.md` (health trajectory)
->    - `memory/cog-meta/briefing-bridge.md` (housekeeping findings)
->    - Recent observations across all domains (last 7 days)
->    - Thread current-state sections — what narratives are actively unfolding?
+> "Read `memory/domains.yml`" (to know what already exists)
+> "List `~/.claude/projects/` and find the directory that matches this
+> project's path" (Phase 3d, transcript discovery)
+> Implicit `ls memory/{domain.path}/` to decide which starter files
+> are missing (Phase 3b, "create … if it doesn't exist")
+> Implicit `ls .claude/commands/` to decide which command files need
+> (re)writing (Phase 3c)
 
-With N active domains, that is `1 + 2N + 5 + (recent-obs scan)` reads —
-roughly **2N + 6** file fetches plus an ad-hoc grep for last-7-day observations.
-For a six-domain cog (personal, work, projects, health, family, cog-meta) that
-is ~18 round trips before any synthesis begins.
+Round-trips on a re-run: 1 YAML read + N directory listings + 1
+transcripts dir listing ≈ 3–8 filesystem calls before the conversation
+can resume.
 
 ### 2. Rewritten orientation block
 
-Two RPC calls cover the entire scan:
+A single RPC covers the manifest half of the discovery:
 
-- **`session_brief`** — returns the cross-domain envelope: global `hot-memory.md`,
-  domain index from `domains.yml`, and patterns. Drives the first decision:
-  *which domains have signal worth descending into?* The `domains[]` field plus
-  `hot_memory` summaries replace steps 1 and the cross-domain bullet of step 3.
-- **`recent_observations(window_days=7)`** — returns the windowed observation
-  scan with `by_domain` and `by_tag` aggregates. Drives the velocity / stall
-  classification in process step 2; the `by_domain` counts make
-  *Dormant* and *Stalling* directly readable instead of inferred from N greps.
+- `domain_summary(role="setup", domain="*")` — or, more cheaply,
+  consume the `domains` slice already returned by
+  `session_brief(role="setup")`. The driving field is the **list of
+  `id`s already present**: it tells the skill whether this is a fresh
+  install ("no domains yet → run full Phase 1") or a re-run ("ask
+  'add more or reconfigure?'", Rule 5).
 
-For per-domain depth on the domains `session_brief` flagged hot, follow with
-**`domain_summary(domain=...)`** once per surfaced domain (typically 1–3, not
-all N). `domain_summary` returns hot-memory + action-items + recent
-observations + entities for that domain in one envelope — replacing the
-per-domain pair of reads in step 2 and the personal-domain reads in step 3.
+For each existing domain, the same `domain_summary` response carries
+`files_present[]`, which drives Phase 3b's "create if missing" loop
+without a per-domain `ls`.
 
-Round-trip count for a six-domain cog: **`1 (session_brief) + 1 (recent_observations) + ~2 (domain_summary on hot domains) = ~4`** calls,
-down from ~18.
+Transcript-path discovery (`~/.claude/projects/<slug>`) has no RPC
+analogue — it inspects the Claude Code install, not Cog memory — so it
+stays as a one-shot filesystem call. Called out under "Gaps surfaced".
 
-### 3. Original process steps (memory reads)
+### 3. Original process steps involving memory reads
 
-Quoted:
+Setup is overwhelmingly a *write* skill. The few read-shaped steps are:
 
-> ### 2. Velocity & Stall Detection
+> Phase 3a: "Write the complete manifest file." — implicitly requires
+> reading the prior `domains.yml` so cog-meta and untouched entries
+> are preserved across re-runs.
 >
-> Scan action-items across all domains. Classify each active item:
-> - **Accelerating** — multiple updates in the last week, clear momentum.
-> - **Cruising** — steady progress, on track.
-> - **Stalling** — no movement in 2+ weeks despite not being deferred.
-> - **Dormant** — domain-level silence (0 observations in 4+ weeks).
-
-> ### 3. Timing Awareness
+> Phase 3b: "For each file in the domain's `files` array, create
+> `memory/{domain.path}/{file}.md` **if it doesn't exist**." — requires
+> a directory listing per domain.
 >
-> Read calendar and entities for upcoming events in the next 2-4 weeks.
-
-> ### 4. Pattern Projection
+> Phase 3c: "If the file already exists, overwrite it (the template is
+> the source of truth)." — no read needed, but the loop is bounded by
+> the manifest's domain list, which must first be in hand.
 >
-> Read patterns and recent observations. Project forward.
-
-Each of these steps re-reads files already opened in orientation, or asks for
-date-windowed slices the LLM must compute by hand.
+> Phase 3e: "Read `CLAUDE.md`. Find the domain routing table … Keep
+> all non-domain rows … as-is" — single file read, no rewrite.
 
 ### 4. Rewritten process steps
 
-- **Velocity & Stall Detection** — driven entirely by `recent_observations`'s
-  `by_domain` counts (4+ week zero = Dormant; check action-items inside
-  `domain_summary` for stalling items). No new reads.
-- **Timing Awareness** — `domain_summary(domain="personal")` already returns
-  entities + the personal hot-memory; calendar lookahead for upcoming events
-  remains the LLM's prose judgment on those entries. No RPC for calendar
-  windowing exists — flagged in Gaps surfaced.
-- **Pattern Projection** — `session_brief` returns patterns; projection itself
-  is LLM work (see callout below). The scenario-candidate detection is
-  judgment on top of the same envelope; no extra read.
-- **Cross-Domain Convergence Scan** — LLM scans `recent_observations.by_tag`
-  + the two-to-three `domain_summary` envelopes for overlaps. No new reads.
-- **Write One Strategic Nudge** — single write to
-  `memory/cog-meta/foresight-nudge.md`. **Write path stays prose**, per
-  guardrail.
+| Phase | Original shape | Rewritten shape |
+|---|---|---|
+| 1 — Discovery (conversational) | unchanged | unchanged (LLM-driven dialogue) |
+| 2 — Confirm summary | unchanged | unchanged (LLM-formatted prose) |
+| 3a — Write `domains.yml` | read prior YAML + write new | `session_brief(role="setup")` provides current manifest in-band → render new YAML → single write call (no RPC; write path stays prose per guardrails) |
+| 3b — Create starter files | per-domain `ls` + per-file create | for each domain, consume `files_present[]` from the same `session_brief`/`domain_summary` payload; write only the diff. Writes remain prose. |
+| 3c — Generate command files | read template + write per domain | unchanged — template read is one-shot and command-file writes are unconditional ("overwrites the file") so no read is needed at all. |
+| 3d — Discover session transcript path | `ls ~/.claude/projects/` + write `reflect-cursor.md` | unchanged — outside Cog memory; see "Gaps surfaced". |
+| 3e — Update `CLAUDE.md` routing table | read CLAUDE.md + regenerate domain rows | unchanged — `CLAUDE.md` is a project file, not Cog memory; no RPC applies. |
+| 4 — Summary | unchanged | unchanged. |
 
-### 5. LLM-judgment preserved
+The net effect: the 3–8 startup reads collapse into a single
+`session_brief` call, and the per-domain "does this file exist?" check
+disappears entirely.
 
-The RPCs return *envelopes*, not nudges. The following stays in the model:
+### 5. LLM-judgment-preserved callout
 
-- Picking **which** domains to descend into after `session_brief`. Not all
-  surfaced domains warrant a `domain_summary` call; the LLM prunes.
-- The convergence judgment itself — recognising that a name or theme appearing
-  in `recent_observations.by_tag` across two domains is meaningful (vs.
-  coincidence).
-- Pattern projection ("if this continues for 2 more weeks, what happens?") —
-  the RPCs surface the data; the trajectory call is the model's.
-- Scenario-candidate gate (fork? stakes? closing window?) — three-part
-  judgment that no envelope can collapse.
-- Composing the single nudge: prioritisation across what could have been a
-  list, citing ≥2 sources, ensuring non-obviousness.
-- The overwrite-vs-preserve decision on `foresight-nudge.md` content (rule:
-  always overwrite, but the LLM still owns the nudge body).
+The whole *point* of `setup` is conversational synthesis — that work
+stays with the model:
+
+- **Domain inference from a free-form interview** (Phase 1): mapping
+  "I run a side project called myapp, my wife and I have two kids,
+  I'm a designer at Acme" into `personal` + `acme` (work) + `myapp`
+  (side-project), plus customized `files` lists ("kids → add
+  `school`", "health condition → add `health`").
+- **Trigger keyword inference** for each domain (company names,
+  project names, colleague names).
+- **The Phase 2 confirmation rewrite** — restating the proposed
+  manifest in plain English so the user can sanity-check before any
+  file is touched.
+- **Re-run reconciliation judgment** (Rule 5 + Rule 2): deciding
+  whether the user wants to add a domain, rename one, or merge
+  observations into a renamed path — the RPC can list what's there,
+  but only the LLM can interpret intent.
 
 ### 6. Round-trip delta
 
-Original: **~2N + 6** reads (≈18 for a six-domain cog).
-Rewritten: **~4** RPC calls (`session_brief` + `recent_observations` + 1–3
-`domain_summary`).
-Range: **4–7×** reduction depending on how many domains the LLM elects to drill
-into.
+- **Current**: ~3–8 filesystem round-trips at orientation on a re-run
+  (1 `domains.yml` read + 1 transcripts dir listing + N per-domain
+  `ls` calls for the "create if missing" loop + 1 `CLAUDE.md` read).
+  Fresh installs are ~1–2 (transcripts listing + `CLAUDE.md` read).
+- **Rewritten**: **1 RPC** (`session_brief`) + 1 unavoidable
+  filesystem read each for the transcripts directory and `CLAUDE.md`,
+  both of which sit outside Cog memory. Fresh installs are the same 1
+  RPC + 2 reads.
+- **Delta**: 3–8 → ~1 inside Cog memory; total round-trips drop to a
+  flat **~3** regardless of install size.
+
+This skill is, and stays, write-dominated; the rewrite's value is
+small in absolute terms but eliminates the only place where setup's
+cost scaled with the number of existing domains.
 
 ---
 
 ## Gaps surfaced
 
-<!-- Append unmet needs here. No new RPCs in scope for this rewrite series. -->
+(Populated by the per-skill sections as they uncover needs the
+current RPC vocabulary can't meet. No new RPCs are *proposed* here —
+this is a needs log for a later design pass.)
 
-- **Calendar / date-window lookahead.** `foresight` step 3 ("Timing
-  Awareness") wants events in the next 2–4 weeks from
-  `memory/personal/calendar.md` and entity birthdays. No RPC scopes to a
-  forward time window; today this stays a raw read + prose scan. A future
-  `upcoming_events(window_days=N)` RPC would close this.
+- **Project-file reads outside `memory/`** — `setup` needs to read
+  `CLAUDE.md` and list `~/.claude/projects/<slug>/` to discover the
+  Claude Code transcripts directory. Neither is Cog memory, so the
+  RPC layer correctly doesn't cover them. Flagging so a future
+  "project-fs" facade isn't accidentally rolled into the memory RPC
+  surface.
