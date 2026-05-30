@@ -3,6 +3,8 @@ package rpc
 import (
 	"encoding/json"
 	"fmt"
+
+	"github.com/bketelsen/cogmemory/store"
 )
 
 // baseParams contains the common role field present in all requests.
@@ -271,6 +273,32 @@ func (srv *Server) handleList(req Request) Response {
 	}
 	return okResponse(req.ID, map[string]interface{}{
 		"paths": paths,
+	})
+}
+
+// --- open_actions ---
+
+type openActionsParams struct {
+	baseParams
+}
+
+func (srv *Server) handleOpenActions(req Request) Response {
+	var p openActionsParams
+	if req.Params != nil {
+		json.Unmarshal(req.Params, &p) //nolint:errcheck
+	}
+	items, err := srv.store.OpenActions()
+	if err != nil {
+		return errorResponse(req.ID, CodeStoreError, "open_actions: "+err.Error())
+	}
+	filtered := make([]store.OpenActionItem, 0, len(items))
+	for _, item := range items {
+		if srv.rbac.Check(p.Role, item.Path, "read") {
+			filtered = append(filtered, item)
+		}
+	}
+	return okResponse(req.ID, map[string]interface{}{
+		"items": filtered,
 	})
 }
 

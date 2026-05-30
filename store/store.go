@@ -39,6 +39,18 @@ type SearchResult struct {
 	Text string `json:"text"`
 }
 
+// OpenActionItem holds one unchecked action item from an action-items.md file.
+type OpenActionItem struct {
+	Domain   string `json:"domain"`
+	Path     string `json:"path"`
+	Line     int    `json:"line"`
+	Text     string `json:"text"`
+	Raw      string `json:"raw"`
+	Due      string `json:"due,omitempty"`
+	Priority string `json:"priority,omitempty"`
+	Added    string `json:"added,omitempty"`
+}
+
 // OutlineEntry holds a markdown heading found in a memory file.
 type OutlineEntry struct {
 	Line  int    `json:"line"`
@@ -600,6 +612,58 @@ func (s *MemoryStore) Search(query string) ([]SearchResult, error) {
 	return results, nil
 }
 
+// OpenActions returns unchecked markdown tasks from all action-items.md files.
+func (s *MemoryStore) OpenActions() ([]OpenActionItem, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	files, err := s.scanFiles()
+	if err != nil {
+		return nil, fmt.Errorf("store: open actions: %w", err)
+	}
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].relPath < files[j].relPath
+	})
+
+	items := []OpenActionItem{}
+	for _, sf := range files {
+		if !isActionItemsPath(sf.relPath) {
+			continue
+		}
+		f, err := os.Open(sf.absPath)
+		if err != nil {
+			continue
+		}
+
+		_ = lockShared(f)
+		scanner := bufio.NewScanner(f)
+		lineNo := 0
+		inComment := false
+		inFence := false
+		for scanner.Scan() {
+			lineNo++
+			line := scanner.Text()
+			trimmed := strings.TrimSpace(line)
+			if skipActionLine(trimmed, &inComment, &inFence) {
+				continue
+			}
+			if !strings.HasPrefix(trimmed, "- [ ] ") {
+				continue
+			}
+			if item, ok := parseOpenActionItem(sf.relPath, lineNo, trimmed); ok {
+				items = append(items, item)
+			}
+		}
+		scanErr := scanner.Err()
+		unlock(f)
+		f.Close()
+		if scanErr != nil {
+			return nil, fmt.Errorf("store: open actions: scan %q: %w", sf.relPath, scanErr)
+		}
+	}
+	return items, nil
+}
+
 // Stats returns file count, total line count, total size, and per-file
 // breakdown. If prefix is non-empty, only files whose relative path begins with
 // prefix (after normalizing trailing slashes) are included; totals reflect only
@@ -706,6 +770,84 @@ func (s *MemoryStore) List() ([]string, error) {
 		paths[i] = sf.relPath
 	}
 	return paths, nil
+}
+
+func isActionItemsPath(relPath string) bool {
+	return relPath == "action-items.md" || strings.HasSuffix(relPath, string(filepath.Separator)+"action-items.md") || strings.HasSuffix(relPath, "/action-items.md")
+}
+
+func skipActionLine(trimmed string, inComment, inFence *bool) bool {
+	if *inComment {
+		if strings.Contains(trimmed, "-->") {
+			*inComment = false
+		}
+		return true
+	}
+	if strings.HasPrefix(trimmed, "<!--") {
+		if !strings.Contains(trimmed, "-->") {
+			*inComment = true
+		}
+		return true
+	}
+	if *inFence {
+		if isFenceLine(trimmed) {
+			*inFence = false
+		}
+		return true
+	}
+	if isFenceLine(trimmed) {
+		*inFence = true
+		return true
+	}
+	return false
+}
+
+func isFenceLine(trimmed string) bool {
+	return strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~")
+}
+
+func parseOpenActionItem(path string, line int, raw string) (OpenActionItem, bool) {
+	body := strings.TrimSpace(strings.TrimPrefix(raw, "- [ ] "))
+	if body == "" {
+		return OpenActionItem{}, false
+	}
+	parts := strings.Split(body, "|")
+	item := OpenActionItem{
+		Domain: domainFromActionPath(path),
+		Path:   path,
+		Line:   line,
+		Text:   strings.TrimSpace(parts[0]),
+		Raw:    raw,
+	}
+	if item.Text == "" {
+		return OpenActionItem{}, false
+	}
+	for _, part := range parts[1:] {
+		key, value, ok := strings.Cut(part, ":")
+		if !ok {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "due":
+			item.Due = strings.TrimSpace(value)
+		case "pri", "priority":
+			item.Priority = strings.TrimSpace(value)
+		case "added":
+			item.Added = strings.TrimSpace(value)
+		}
+	}
+	return item, true
+}
+
+func domainFromActionPath(path string) string {
+	if path == "action-items.md" {
+		return ""
+	}
+	parent := filepath.Dir(path)
+	if parent == "." || parent == string(filepath.Separator) {
+		return ""
+	}
+	return filepath.Base(parent)
 }
 
 // isObsPath returns true if the path looks like an observations file.

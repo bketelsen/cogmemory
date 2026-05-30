@@ -48,6 +48,10 @@ func newTestServer(t *testing.T) *testServer {
 				{Pattern: "cog-meta/self-observations.md", Read: false, Write: false},
 				{Pattern: "**", Read: true, Write: false},
 			},
+			"project-reader": {
+				{Pattern: "projects/**", Read: true, Write: false},
+				{Pattern: "**", Read: false, Write: false},
+			},
 		},
 	}
 	r := rbac.New(cfg)
@@ -431,6 +435,100 @@ func TestHealthMethod(t *testing.T) {
 	json.Unmarshal(resp.Result, &result)
 	if result["ok"] != true {
 		t.Errorf("health result = %v, want {ok: true}", result)
+	}
+}
+
+func TestOpenActionsMethodReturnsReadableUncheckedItems(t *testing.T) {
+	ts := newTestServer(t)
+
+	call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 1, Method: "write",
+		Params: map[string]interface{}{
+			"role": "siona",
+			"path": "projects/dakota/action-items.md",
+			"content": strings.Join([]string{
+				"# Dakota Actions",
+				"",
+				"<!-- Format: - [ ] template | due:YYYY-MM-DD | pri:high -->",
+				"- [ ] Ship open-actions RPC | due:2026-06-01 | pri:high | added:2026-05-30",
+				"- [x] Closed task | pri:low",
+			}, "\n"),
+		},
+	})
+	call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 2, Method: "write",
+		Params: map[string]interface{}{
+			"role":    "siona",
+			"path":    "personal/action-items.md",
+			"content": "- [ ] Private task | pri:medium\n",
+		},
+	})
+
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0",
+		ID:      3,
+		Method:  "open_actions",
+		Params:  map[string]interface{}{"role": "project-reader"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("open_actions error: %v", resp.Error.Message)
+	}
+
+	var result struct {
+		Items []struct {
+			Domain   string `json:"domain"`
+			Path     string `json:"path"`
+			Line     int    `json:"line"`
+			Text     string `json:"text"`
+			Raw      string `json:"raw"`
+			Due      string `json:"due,omitempty"`
+			Priority string `json:"priority,omitempty"`
+			Added    string `json:"added,omitempty"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("unmarshal open_actions result: %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("open_actions returned %d items, want 1: %+v", len(result.Items), result.Items)
+	}
+	item := result.Items[0]
+	if item.Domain != "dakota" ||
+		item.Path != "projects/dakota/action-items.md" ||
+		item.Line != 4 ||
+		item.Text != "Ship open-actions RPC" ||
+		item.Raw != "- [ ] Ship open-actions RPC | due:2026-06-01 | pri:high | added:2026-05-30" ||
+		item.Due != "2026-06-01" ||
+		item.Priority != "high" ||
+		item.Added != "2026-05-30" {
+		t.Fatalf("open_actions item = %+v", item)
+	}
+}
+
+func TestOpenActionsMethodEmptyResultIsArray(t *testing.T) {
+	ts := newTestServer(t)
+
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0",
+		ID:      1,
+		Method:  "open_actions",
+		Params:  map[string]interface{}{"role": "siona"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("open_actions error: %v", resp.Error.Message)
+	}
+
+	var result struct {
+		Items []json.RawMessage `json:"items"`
+	}
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("unmarshal open_actions result: %v", err)
+	}
+	if result.Items == nil {
+		t.Fatal("items is nil, want empty JSON array")
+	}
+	if len(result.Items) != 0 {
+		t.Fatalf("items length = %d, want 0", len(result.Items))
 	}
 }
 

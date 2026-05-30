@@ -14,7 +14,7 @@ standalone Go service that can be installed per user and managed by systemd.
 
 - JSON-RPC 2.0 over Unix Domain Socket
 - Methods: `read`, `write`, `append`, `patch`, `search`, `stats`, `l0index`,
-  `list`, `health`
+  `list`, `open_actions`, `health`
 - File locking and atomic writes
 - Glob-pattern RBAC by role
 - Optional systemd notify/watchdog support
