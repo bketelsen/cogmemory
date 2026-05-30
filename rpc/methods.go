@@ -648,6 +648,59 @@ func resolveSince(s string) (time.Time, string, error) {
 	return time.Time{}, "", fmt.Errorf("unrecognized `since` value %q (want YYYY-MM-DD, RFC3339, or duration like \"7d\"/\"168h\")", s)
 }
 
+// --- entity_audit ---
+
+type entityAuditParams struct {
+	baseParams
+	// Domain, when set, restricts the audit to that single domain id.
+	Domain string `json:"domain,omitempty"`
+}
+
+func (srv *Server) handleEntityAudit(req Request) Response {
+	var p entityAuditParams
+	if req.Params != nil {
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return errorResponse(req.ID, CodeInvalidParams, "entity_audit: invalid params: "+err.Error())
+		}
+	}
+	if p.Role == "" {
+		return errorResponse(req.ID, CodeInvalidParams, "entity_audit: role required")
+	}
+	if srv.controller == nil {
+		return errorResponse(req.ID, CodeStoreError, "entity_audit: controller unavailable")
+	}
+
+	var ctrlTargets []domain.ActionTarget
+	if p.Domain != "" {
+		d, err := srv.controller.Get(p.Domain)
+		if err != nil {
+			return errorResponse(req.ID, CodeInvalidParams, "entity_audit: "+err.Error())
+		}
+		path, err := srv.controller.ResolveFile(d.ID, "entities")
+		if err != nil {
+			return errorResponse(req.ID, CodeInvalidParams, "entity_audit: "+err.Error())
+		}
+		ctrlTargets = []domain.ActionTarget{{Domain: d.ID, Path: path}}
+	} else {
+		ctrlTargets = srv.controller.Entities()
+	}
+
+	// RBAC filter targets up front: a role only audits files it can read.
+	targets := make([]store.ActionTarget, 0, len(ctrlTargets))
+	for _, t := range ctrlTargets {
+		if !srv.rbac.Check(p.Role, t.Path, "read") {
+			continue
+		}
+		targets = append(targets, store.ActionTarget{Domain: t.Domain, Path: t.Path})
+	}
+
+	res, err := srv.store.EntityAudit(targets, time.Now().UTC())
+	if err != nil {
+		return errorResponse(req.ID, CodeStoreError, "entity_audit: "+err.Error())
+	}
+	return okResponse(req.ID, res)
+}
+
 // --- health ---
 
 func (srv *Server) handleHealth(req Request) Response {
