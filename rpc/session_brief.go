@@ -51,9 +51,9 @@ func (srv *Server) handleSessionBrief(req Request) Response {
 	}
 
 	var (
-		targets               []store.ActionTarget
-		visibleDomains        = []sessionBriefDomain{}
-		controllerLastErr     interface{}
+		targets           []store.ActionTarget
+		visibleDomains    = []sessionBriefDomain{}
+		controllerLastErr interface{}
 	)
 	if srv.controller != nil {
 		if e := srv.controller.LastError(); e != nil {
