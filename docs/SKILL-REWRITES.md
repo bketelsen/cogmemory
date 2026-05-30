@@ -344,6 +344,95 @@ Range: **~14 → ~5–6 round-trips**, roughly a 3× reduction with no change to
 
 ---
 
+## `evolve`
+
+Source: [cog-prime `.claude/commands/evolve.md`](https://github.com/marciopuga/cog/blob/main/.claude/commands/evolve.md). Systems-level architecture audit: reads continuity logs, measures structural files, proposes rule changes, regenerates the scorecard, appends observations + log entries. **Never touches memory content.**
+
+### 1. Original orientation block
+
+From `## Orientation (run FIRST, before any file reads)` (evolve.md lines 25–43):
+
+```bash
+# What did housekeeping and reflect change recently?
+git diff HEAD~1 --stat memory/
+
+# Detailed diff of architectural files (what you care about)
+git diff HEAD~1 memory/cog-meta/patterns.md memory/hot-memory.md CLAUDE.md
+
+# What changed in the last 24h?
+find memory/ -type f -name "*.md" -mtime -1 | sort
+
+# Current prompt weight components (quick file sizes)
+wc -c memory/hot-memory.md memory/cog-meta/patterns.md memory/cog-meta/briefing-bridge.md 2>/dev/null
+```
+
+Plus the `## Memory Files` block (lines 9–23) naming six files to open by hand: `evolve-log.md`, `evolve-observations.md`, `CLAUDE.md`, `.claude/commands/housekeeping.md`, `.claude/commands/reflect.md`, and the *measure* set (`hot-memory.md`, `cog-meta/patterns.md`, plus every `*/patterns.md` satellite).
+
+Concrete shape: **4 shell scans + 6 named file reads + N satellite pattern reads** (one per active domain) before audit work begins. On a 4-domain setup, that's ~14 ops.
+
+### 2. Rewritten orientation block
+
+Two RPC calls cover the architectural envelope:
+
+1. `session_brief(role)` → returns the standard session-start envelope. The field that drives evolve's downstream decisions is **`recent_observations`** — answering "what did housekeeping/reflect actually do?" without re-reading every domain file. Global `hot_memory` body comes back in the same envelope.
+2. `housekeeping_scan(role)` → already collapses architectural health: per-file `lines` / `size_bytes` for hot-memory, `cog-meta/patterns.md`, and every `*/patterns.md` satellite; entity-file fan-out; cap utilization. The **`per_file`** map is the scorecard substrate and the bloat signal in one call. Per RPC-CONSOLIDATION.md §2, this is the named replacement for the orientation shell pipeline.
+
+Plus one targeted RPC for the entity ratio:
+
+3. `entity_audit(role)` → returns `total_entries`, `total_lines`, and violation counts; the compression ratio `total_lines / total_entries` is a divide on the response, not a multi-file scan.
+
+Three direct `cog_read` calls remain because they're code-like rule references, not memory content, and no RPC covers them: `CLAUDE.md`, `.claude/commands/housekeeping.md`, `.claude/commands/reflect.md`. Two more direct reads for evolve's own continuity logs (`cog-meta/evolve-log.md`, `cog-meta/evolve-observations.md`) — `recent_observations` is domain-scoped and doesn't cover the cog-meta evolve streams.
+
+### 3. Original process steps involving memory reads
+
+§2 *Process Effectiveness Audit*:
+
+> Review the output of recent housekeeping and reflect runs […]
+> **Scorecard metrics** — measure and record in evolve-log:
+> - Core `patterns.md`: line count / 70, byte size / 5.5KB (target: ≤1.0)
+> - Satellite pattern files: list each with line count (soft cap: 30)
+> - Entity compression ratio: `(total entity lines across all files) / (total ### entries)` (target: ≤3.0)
+> - Hot-memory line counts vs caps
+
+§5 *Generate Scorecard*:
+
+> Overwrite `memory/cog-meta/scorecard.md` with current metrics: […] (re-derives the same numbers a second time)
+
+§6 *Write Observations & Update Log*:
+
+> **Observations** — Append to `memory/cog-meta/evolve-observations.md` […]
+> **Evolve Log** — Append to `memory/cog-meta/evolve-log.md` […]
+
+Each scorecard bullet is at least one file open + grep/wc-style scan; satellite enumeration multiplies by domain count; §5 then re-fetches everything to write the scorecard file.
+
+### 4. Rewritten process steps
+
+- **§1 Architecture Review** — pure LLM judgment over the `housekeeping_scan` envelope + the two skill rule files. No new reads.
+- **§2 Process Effectiveness Audit** — "did housekeeping prune the right things?" answered by diffing the `recent_observations` tail (from `session_brief`) against `housekeeping_scan.findings`. "Are pattern files under cap?" → `housekeeping_scan.per_file` for core + every satellite in one call. "Entity compression ratio" → `entity_audit` response, divide. Zero per-file re-reads.
+- **§5 Generate Scorecard** — every numeric field comes from the `housekeeping_scan` + `entity_audit` responses already in context. The `cog_write` to `cog-meta/scorecard.md` (allow-listed) is a single call. Write path — not a rewrite target per doc-level guardrails.
+- **§§3, 4, 6, 7** (rule proposals, content-issue routing, observations + log appends, debrief) — write paths and judgment. `cog_append` to `evolve-observations.md` and `evolve-log.md`, `cog_write` to `scorecard.md`. Unchanged.
+
+### 5. LLM-judgment-preserved callout
+
+The rewrite hands the LLM **more** room for judgment, not less, by deleting mechanical scans. These stay LLM-owned:
+
+- Reading `CLAUDE.md`, `housekeeping.md`, `reflect.md` and deciding whether the rules-as-written are firing as intended (§1).
+- Distinguishing **rule drift** from one-off noise in the housekeeping/reflect output streams — when a recurring content issue should become a rule change vs. be routed back as a one-off (§2, §4).
+- Tagging process-health observations correctly: `bloat`, `rule-drift`, `architecture`, `gap`, `opportunity`, `process-health` (§6).
+- Writing scorecard prose framing around the numbers — numbers are RPC-fed, narrative is LLM (§5).
+- The §7 debrief synthesis, including the "Next 3 evolve priorities" call.
+- The whole §3 *Rule Change Proposals* loop — RPCs measure, the LLM proposes.
+
+### 6. Round-trip delta
+
+Before: **~10–14 memory-touching ops per run** (4 shell scans + 6 named files + N satellite reads + implicit §2/§5 re-reads). Scales with domain count.
+
+After: **~8 ops per run** — 2 RPCs (`session_brief`, `housekeeping_scan`) + 1 RPC (`entity_audit`) + 3 direct reads for code-like rule files (`CLAUDE.md`, `housekeeping.md`, `reflect.md`) + 2 direct reads for evolve's continuity logs. Crucially, satellite enumeration stops scaling with domain count — it folds into `housekeeping_scan`.
+
+Range: **~10–14 → ~8 round-trips**, with the satellite-scaling cliff removed.
+
+---
+
 ## Gaps surfaced
 
 (Populated by the per-skill sections as they uncover needs the
