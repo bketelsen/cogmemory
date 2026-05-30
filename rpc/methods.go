@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 	"time"
 
@@ -341,6 +342,77 @@ func (srv *Server) handleOpenActions(req Request) Response {
 	})
 }
 
+// --- recent_observations ---
+
+type recentObservationsParams struct {
+	baseParams
+	// Since is an inclusive YYYY-MM-DD lower bound. Empty defaults to
+	// "today minus 7 days" (reflect + foresight's standard window).
+	Since string `json:"since,omitempty"`
+	// ByTag, when set, restricts entries to those whose tag list contains
+	// the given tag (case-sensitive). Aggregates reflect the filtered set.
+	ByTag string `json:"by_tag,omitempty"`
+	// ByDomain, when set, restricts the scan to a single canonical domain id.
+	ByDomain string `json:"by_domain,omitempty"`
+}
+
+var dateOnlyRE = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+
+func (srv *Server) handleRecentObservations(req Request) Response {
+	var p recentObservationsParams
+	if req.Params != nil {
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return errorResponse(req.ID, CodeInvalidParams, "recent_observations: invalid params: "+err.Error())
+		}
+	}
+	if p.Role == "" {
+		return errorResponse(req.ID, CodeInvalidParams, "recent_observations: role required")
+	}
+	if p.Since != "" && !dateOnlyRE.MatchString(p.Since) {
+		return errorResponse(req.ID, CodeInvalidParams,
+			fmt.Sprintf("recent_observations: since %q must be YYYY-MM-DD", p.Since))
+	}
+	since := p.Since
+	if since == "" {
+		since = time.Now().UTC().AddDate(0, 0, -7).Format("2006-01-02")
+	}
+
+	var targets []store.ObsTarget
+	if srv.controller != nil {
+		if p.ByDomain != "" {
+			d, err := srv.controller.Get(p.ByDomain)
+			if err != nil {
+				return errorResponse(req.ID, CodeInvalidParams, "recent_observations: "+err.Error())
+			}
+			path, err := srv.controller.ResolveFile(d.ID, "observations")
+			if err != nil {
+				return errorResponse(req.ID, CodeInvalidParams, "recent_observations: "+err.Error())
+			}
+			targets = []store.ObsTarget{{Domain: d.ID, Path: path}}
+		} else {
+			ctrlTargets := srv.controller.Observations()
+			targets = make([]store.ObsTarget, 0, len(ctrlTargets))
+			for _, t := range ctrlTargets {
+				targets = append(targets, store.ObsTarget{Domain: t.Domain, Path: t.Path})
+			}
+		}
+	}
+
+	// RBAC pre-filter on the target list — never read a file the role can't.
+	allowed := make([]store.ObsTarget, 0, len(targets))
+	for _, t := range targets {
+		if srv.rbac.Check(p.Role, t.Path, "read") {
+			allowed = append(allowed, t)
+		}
+	}
+
+	result, err := srv.store.RecentObservations(allowed, since, p.ByTag, "")
+	if err != nil {
+		return errorResponse(req.ID, CodeStoreError, "recent_observations: "+err.Error())
+	}
+	return okResponse(req.ID, result)
+}
+
 // --- domains.list / domains.get ---
 
 type domainsListParams struct {
@@ -529,7 +601,7 @@ func (srv *Server) handleDomainSummary(req Request) Response {
 				result.CompletedActionCountSince = completed
 			}
 		case "observations":
-			if obs, oerr := srv.store.RecentObservations(rel, sinceDate); oerr == nil {
+			if obs, oerr := srv.store.RecentObservationsForFile(rel, sinceDate); oerr == nil {
 				result.RecentObservations = obs
 				// Bias last_activity off the newest observation date too —
 				// mtime can lag if a file was touched without content edits.

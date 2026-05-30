@@ -20,7 +20,7 @@ func TestRecentObservationsFiltersAndParses(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "observations.md"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	obs, err := s.RecentObservations("observations.md", "2026-05-15")
+	obs, err := s.RecentObservationsForFile("observations.md", "2026-05-15")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +32,7 @@ func TestRecentObservationsFiltersAndParses(t *testing.T) {
 	}
 
 	// Missing file → empty, no error.
-	got, err := s.RecentObservations("nope.md", "")
+	got, err := s.RecentObservationsForFile("nope.md", "")
 	if err != nil || len(got) != 0 {
 		t.Errorf("missing file: got=%v err=%v", got, err)
 	}
