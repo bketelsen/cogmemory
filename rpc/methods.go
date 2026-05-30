@@ -643,15 +643,15 @@ type domainSummaryParams struct {
 // DomainSummaryResult is the typed envelope returned by domain_summary.
 // Field shape mirrors RPC-CONSOLIDATION.md §5.
 type DomainSummaryResult struct {
-	Domain                    string                   `json:"domain"`
-	Label                     string                   `json:"label"`
-	HotMemory                 string                   `json:"hot_memory"`
-	OpenActionCount           int                      `json:"open_action_count"`
-	CompletedActionCountSince int                      `json:"completed_action_count_since"`
+	Domain                    string              `json:"domain"`
+	Label                     string              `json:"label"`
+	HotMemory                 string              `json:"hot_memory"`
+	OpenActionCount           int                 `json:"open_action_count"`
+	CompletedActionCountSince int                 `json:"completed_action_count_since"`
 	RecentObservations        []store.ObservationEntry `json:"recent_observations"`
-	FilesPresent              []string                 `json:"files_present"`
-	LastActivity              string                   `json:"last_activity"`
-	Since                     string                   `json:"since"`
+	FilesPresent              []string            `json:"files_present"`
+	LastActivity              string              `json:"last_activity"`
+	Since                     string              `json:"since"`
 }
 
 func (srv *Server) handleDomainSummary(req Request) Response {

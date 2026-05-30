@@ -41,9 +41,9 @@ func TestSessionBriefReturnsEnvelope(t *testing.T) {
 	}
 
 	var result struct {
-		HotMemory string `json:"hot_memory"`
-		Patterns  string `json:"patterns"`
-		Domains   []struct {
+		HotMemory    string                 `json:"hot_memory"`
+		Patterns     string                 `json:"patterns"`
+		Domains      []struct {
 			ID       string   `json:"id"`
 			Label    string   `json:"label"`
 			Triggers []string `json:"triggers"`
