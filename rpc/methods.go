@@ -504,6 +504,42 @@ func parseSince(raw string, now time.Time) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("invalid since %q (want RFC3339 date, duration, or Nd)", raw)
 }
 
+// --- scenario_check ---
+
+type scenarioCheckParams struct {
+	baseParams
+}
+
+// handleScenarioCheck returns the schedule of active scenario files in
+// cog-meta/scenarios/. Assumption-verification stays with the LLM — this
+// just answers "which scenarios are due, overdue, or still active, and by
+// how many days?" RBAC is enforced per-file on read against cog-meta/scenarios/.
+func (srv *Server) handleScenarioCheck(req Request) Response {
+	var p scenarioCheckParams
+	if req.Params != nil {
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return errorResponse(req.ID, CodeInvalidParams, "scenario_check: invalid params: "+err.Error())
+		}
+	}
+	if p.Role == "" {
+		return errorResponse(req.ID, CodeInvalidParams, "scenario_check: role required")
+	}
+
+	entries, err := srv.store.ScenarioCheck(time.Now().UTC())
+	if err != nil {
+		return errorResponse(req.ID, CodeStoreError, "scenario_check: "+err.Error())
+	}
+	filtered := make([]store.ScenarioEntry, 0, len(entries))
+	for _, e := range entries {
+		if srv.rbac.Check(p.Role, e.Path, "read") {
+			filtered = append(filtered, e)
+		}
+	}
+	return okResponse(req.ID, map[string]interface{}{
+		"scenarios": filtered,
+	})
+}
+
 // --- domains.list / domains.get ---
 
 type domainsListParams struct {
