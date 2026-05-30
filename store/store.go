@@ -87,6 +87,60 @@ type GlacierEntry struct {
 	Summary   string   `json:"summary,omitempty"`
 }
 
+// EntityFormatViolation flags an entity whose block exceeds the 3-line compact
+// format. Lines counts non-blank, non-comment lines in the block including the
+// `### Name` heading. HasDetailFile is true when the block references a
+// detail file via a [[wiki:...]] link — signalling the long form is
+// intentional and the body line could be compressed to a one-liner pointer.
+type EntityFormatViolation struct {
+	Path          string `json:"path"`
+	Domain        string `json:"domain,omitempty"`
+	Name          string `json:"name"`
+	Lines         int    `json:"lines"`
+	Issue         string `json:"issue"`
+	HasDetailFile bool   `json:"has_detail_file"`
+}
+
+// EntityGlacierCandidate flags an entity whose `status: inactive` or whose
+// `last:` date is older than the glacier threshold (180 days).
+type EntityGlacierCandidate struct {
+	Path    string `json:"path"`
+	Domain  string `json:"domain,omitempty"`
+	Name    string `json:"name"`
+	Status  string `json:"status,omitempty"`
+	Last    string `json:"last,omitempty"`
+	AgeDays int    `json:"age_days,omitempty"`
+}
+
+// EntityMissingMetadata flags an entity missing one or more required
+// metadata fields (currently: status, last).
+type EntityMissingMetadata struct {
+	Path    string   `json:"path"`
+	Domain  string   `json:"domain,omitempty"`
+	Name    string   `json:"name"`
+	Missing []string `json:"missing"`
+}
+
+// EntityTemporalViolation flags a `(until YYYY-MM)` marker whose date has
+// passed and which has not already been struck through (`~~...~~`).
+type EntityTemporalViolation struct {
+	Path   string `json:"path"`
+	Domain string `json:"domain,omitempty"`
+	Name   string `json:"name"`
+	Line   int    `json:"line"`
+	Text   string `json:"text"`
+	Needs  string `json:"needs"`
+}
+
+// EntityAuditResult is the four-bucket envelope returned by EntityAudit.
+// All slices are non-nil so JSON output never contains `null`.
+type EntityAuditResult struct {
+	FormatViolations   []EntityFormatViolation   `json:"format_violations"`
+	GlacierCandidates  []EntityGlacierCandidate  `json:"glacier_candidates"`
+	MissingMetadata    []EntityMissingMetadata   `json:"missing_metadata"`
+	TemporalViolations []EntityTemporalViolation `json:"temporal_violations"`
+}
+
 // MemoryStore provides file-based memory operations rooted at a directory.
 type MemoryStore struct {
 	root string
@@ -1201,6 +1255,259 @@ func extractFrontmatter(data []byte) ([]byte, bool) {
 		}
 	}
 	return nil, false
+}
+
+// entityHeadingRE matches an entity header line: `### Name` (with optional
+// trailing parenthetical, e.g. `### Microsoft (employer)`). The captured
+// group is the cleaned name without the parenthetical.
+var entityHeadingRE = regexp.MustCompile(`^###\s+(.+?)\s*$`)
+
+// entityUntilRE finds `(until YYYY-MM)` markers in a line. The capture is the
+// YYYY-MM string. Already-struck-through markers (`~~(until YYYY-MM)~~`) are
+// matched too; the caller checks for surrounding `~~` to decide whether to
+// flag.
+var entityUntilRE = regexp.MustCompile(`\(until\s+(\d{4}-\d{2})\)`)
+
+// entityDetailLinkRE matches a [[wiki:...]] link anywhere in a block, used
+// to flag long-form entries that already point at a detail file.
+var entityDetailLinkRE = regexp.MustCompile(`\[\[wiki:[^\]]+\]\]`)
+
+// EntityAudit scans the supplied entities.md targets and returns four buckets
+// of violations: format (blocks exceeding the 3-line compact shape),
+// glacier candidates (status:inactive or last:>180d), missing metadata, and
+// temporal markers `(until YYYY-MM)` whose dates have passed and which have
+// not been struck through. Missing files are skipped silently. The result's
+// slices are all non-nil so callers can safely range without nil checks.
+//
+// "now" is parameterized so tests can pin a deterministic clock.
+func (s *MemoryStore) EntityAudit(targets []ActionTarget, now time.Time) (EntityAuditResult, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	res := EntityAuditResult{
+		FormatViolations:   []EntityFormatViolation{},
+		GlacierCandidates:  []EntityGlacierCandidate{},
+		MissingMetadata:    []EntityMissingMetadata{},
+		TemporalViolations: []EntityTemporalViolation{},
+	}
+
+	sorted := make([]ActionTarget, len(targets))
+	copy(sorted, targets)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Path < sorted[j].Path })
+
+	for _, t := range sorted {
+		abs, err := s.absPath(t.Path)
+		if err != nil {
+			return EntityAuditResult{}, fmt.Errorf("store: entity audit: %w", err)
+		}
+		f, err := os.Open(abs)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return EntityAuditResult{}, fmt.Errorf("store: entity audit: open %q: %w", t.Path, err)
+		}
+		_ = lockShared(f)
+		data, readErr := io.ReadAll(f)
+		unlock(f)
+		f.Close()
+		if readErr != nil {
+			return EntityAuditResult{}, fmt.Errorf("store: entity audit: read %q: %w", t.Path, readErr)
+		}
+		auditOneEntitiesFile(&res, t.Domain, t.Path, string(data), now)
+	}
+	return res, nil
+}
+
+// auditOneEntitiesFile parses one entities.md body and appends violations to
+// res. The format is "### Name" headers separated by blank lines, each block
+// containing one body line per fact plus optional `status:` / `last:`
+// metadata. We treat everything from a `### ` line until the next `### `
+// (or EOF) as one block.
+func auditOneEntitiesFile(res *EntityAuditResult, domainID, path, body string, now time.Time) {
+	lines := strings.Split(body, "\n")
+
+	type block struct {
+		name      string
+		startLine int // 1-indexed line of the ### heading
+		bodyLines []string
+		bodyAbs   []int // absolute line numbers (1-indexed) for each bodyLine
+	}
+	var blocks []block
+	var cur *block
+
+	for i, raw := range lines {
+		if m := entityHeadingRE.FindStringSubmatch(raw); m != nil {
+			if cur != nil {
+				blocks = append(blocks, *cur)
+			}
+			cur = &block{name: stripParenSuffix(m[1]), startLine: i + 1}
+			continue
+		}
+		if cur == nil {
+			continue
+		}
+		cur.bodyLines = append(cur.bodyLines, raw)
+		cur.bodyAbs = append(cur.bodyAbs, i+1)
+	}
+	if cur != nil {
+		blocks = append(blocks, *cur)
+	}
+
+	for _, b := range blocks {
+		// Count "meaningful" lines: heading + non-blank, non-comment body lines.
+		count := 1
+		hasDetail := false
+		hasStatus := false
+		hasLast := false
+		var lastVal string
+		var statusVal string
+		for k, ln := range b.bodyLines {
+			trim := strings.TrimSpace(ln)
+			if trim == "" {
+				continue
+			}
+			if strings.HasPrefix(trim, "<!--") {
+				continue
+			}
+			count++
+			if entityDetailLinkRE.MatchString(ln) {
+				hasDetail = true
+			}
+			if s, ok := extractInlineField(ln, "status"); ok {
+				hasStatus = true
+				statusVal = s
+			}
+			if v, ok := extractInlineField(ln, "last"); ok {
+				hasLast = true
+				lastVal = v
+			}
+			// Temporal markers anywhere in the body.
+			for _, mm := range entityUntilRE.FindAllStringSubmatchIndex(ln, -1) {
+				dateStr := ln[mm[2]:mm[3]]
+				if isPastYYYYMM(dateStr, now) && !isStruckThrough(ln, mm[0], mm[1]) {
+					res.TemporalViolations = append(res.TemporalViolations, EntityTemporalViolation{
+						Path:   path,
+						Domain: domainID,
+						Name:   b.name,
+						Line:   b.bodyAbs[k],
+						Text:   strings.TrimSpace(ln),
+						Needs:  "strikethrough",
+					})
+				}
+			}
+		}
+
+		if count > 3 {
+			res.FormatViolations = append(res.FormatViolations, EntityFormatViolation{
+				Path:          path,
+				Domain:        domainID,
+				Name:          b.name,
+				Lines:         count,
+				Issue:         "exceeds_3_line_compact",
+				HasDetailFile: hasDetail,
+			})
+		}
+
+		var missing []string
+		if !hasStatus {
+			missing = append(missing, "status")
+		}
+		if !hasLast {
+			missing = append(missing, "last")
+		}
+		if len(missing) > 0 {
+			res.MissingMetadata = append(res.MissingMetadata, EntityMissingMetadata{
+				Path:    path,
+				Domain:  domainID,
+				Name:    b.name,
+				Missing: missing,
+			})
+		}
+
+		// Glacier: status inactive, or last >180d old.
+		isInactive := strings.EqualFold(statusVal, "inactive")
+		ageDays := -1
+		if hasLast {
+			if d, err := time.Parse("2006-01-02", strings.TrimSpace(lastVal)); err == nil {
+				diff := now.Sub(d)
+				if diff > 0 {
+					ageDays = int(diff / (24 * time.Hour))
+				} else {
+					ageDays = 0
+				}
+			}
+		}
+		if isInactive || (ageDays > 180) {
+			res.GlacierCandidates = append(res.GlacierCandidates, EntityGlacierCandidate{
+				Path:    path,
+				Domain:  domainID,
+				Name:    b.name,
+				Status:  statusVal,
+				Last:    lastVal,
+				AgeDays: ageDays,
+			})
+		}
+	}
+}
+
+// stripParenSuffix removes a trailing parenthetical from an entity name:
+// "Microsoft (employer)" → "Microsoft". Leaves embedded parens alone.
+func stripParenSuffix(name string) string {
+	name = strings.TrimSpace(name)
+	if !strings.HasSuffix(name, ")") {
+		return name
+	}
+	idx := strings.LastIndex(name, "(")
+	if idx <= 0 {
+		return name
+	}
+	return strings.TrimSpace(name[:idx])
+}
+
+// extractInlineField scans a metadata-style body line for `field: value`
+// where pipe-separated fields are allowed. Returns the trimmed value.
+// e.g. extractInlineField("status: active | last: 2026-05-27", "last") →
+// "2026-05-27", true.
+func extractInlineField(line, field string) (string, bool) {
+	parts := strings.Split(line, "|")
+	prefix := strings.ToLower(field) + ":"
+	for _, p := range parts {
+		trim := strings.TrimSpace(p)
+		lower := strings.ToLower(trim)
+		if !strings.HasPrefix(lower, prefix) {
+			continue
+		}
+		val := strings.TrimSpace(trim[len(prefix):])
+		// Cut at the first " | " that may have leaked or a trailing arrow link.
+		if cut := strings.Index(val, " ("); cut > 0 {
+			val = strings.TrimSpace(val[:cut])
+		}
+		return val, true
+	}
+	return "", false
+}
+
+// isPastYYYYMM returns true when YYYY-MM (interpreted as the first of that
+// month) is strictly before the first of `now`'s month. So a marker `(until
+// 2026-05)` is "past" only on or after 2026-06-01.
+func isPastYYYYMM(s string, now time.Time) bool {
+	t, err := time.Parse("2006-01", s)
+	if err != nil {
+		return false
+	}
+	nowMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	return t.Before(nowMonth)
+}
+
+// isStruckThrough reports whether the substring at line[start:end] is wrapped
+// by `~~ ... ~~` markdown strikethrough.
+func isStruckThrough(line string, start, end int) bool {
+	if start >= 2 && line[start-2:start] == "~~" &&
+		end+2 <= len(line) && line[end:end+2] == "~~" {
+		return true
+	}
+	return false
 }
 
 // Git runs a git operation in the memory root directory.

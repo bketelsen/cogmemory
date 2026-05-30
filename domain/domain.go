@@ -217,6 +217,28 @@ func (c *Controller) Observations() []ActionTarget {
 	return out
 }
 
+// Entities returns one ActionTarget per domain (or subdomain) that declares
+// "entities" in its files list. The Domain field is the canonical id; Path is
+// the POSIX-joined relative path to <domain.Path>/entities.md. The store
+// decides whether the file actually exists on disk.
+func (c *Controller) Entities() []ActionTarget {
+	c.maybeReload()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	var out []ActionTarget
+	walk(c.domains, func(d Domain) {
+		if !declaresFile(d, "entities") {
+			return
+		}
+		out = append(out, ActionTarget{
+			Domain: d.ID,
+			Path:   joinPosix(d.Path, "entities.md"),
+		})
+	})
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	return out
+}
+
 // ResolveFile returns the relative path on disk for a given domain id +
 // declared file base name (e.g. "action-items" → "work/microsoft/action-items.md").
 // Returns an error if the domain is unknown or doesn't declare the file.

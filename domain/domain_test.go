@@ -222,3 +222,17 @@ func TestControllerMissingManifestEmpty(t *testing.T) {
 		t.Fatalf("LastError = %v, want nil", c.LastError())
 	}
 }
+
+func TestControllerEntitiesResolves(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, goodManifest)
+	c, _ := domain.New(dir)
+	targets := c.Entities()
+	// Only `personal` declares entities in goodManifest.
+	if len(targets) != 1 {
+		t.Fatalf("Entities = %+v, want 1", targets)
+	}
+	if targets[0].Domain != "personal" || targets[0].Path != "personal/entities.md" {
+		t.Fatalf("Entities[0] = %+v", targets[0])
+	}
+}
