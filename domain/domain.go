@@ -40,6 +40,10 @@ type ActionTarget struct {
 	Path   string // POSIX-style relative path, e.g. "work/microsoft/action-items.md"
 }
 
+// ObservationTarget — removed. Both Controller.Observations() and its
+// callers now use ActionTarget directly; the shape is identical so the
+// alias was redundant.
+
 // manifest is the raw yaml shape: top-level `domains: [...]`.
 type manifest struct {
 	Version int      `yaml:"version,omitempty"`
@@ -238,6 +242,10 @@ func (c *Controller) Entities() []ActionTarget {
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out
 }
+
+// Observations() — defined above (line 209). The cluster_check branch added
+// a duplicate variant returning ObservationTarget; collapsed onto the single
+// ActionTarget-returning version since the shape is identical.
 
 // ResolveFile returns the relative path on disk for a given domain id +
 // declared file base name (e.g. "action-items" → "work/microsoft/action-items.md").
