@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/bketelsen/cogmemory/config"
 	"github.com/bketelsen/cogmemory/domain"
@@ -940,5 +941,259 @@ func TestOpenActionsDomainComesFromController(t *testing.T) {
 	json.Unmarshal(resp.Result, &result)
 	if len(result.Items) != 1 || result.Items[0].Domain != "work" {
 		t.Fatalf("want domain=work (from controller), got %+v", result.Items)
+	}
+}
+
+// --- recent_observations ---
+
+// seedObs writes a multi-line observations.md via the underlying store helper
+// path (raw write of well-formed lines). The RPC `append` validates format,
+// but tests bypass that by writing the full content with the regular `write`
+// method since observations.md content here is intentionally well-formed.
+func seedObs(t *testing.T, ts *testServer, path, body string) {
+	t.Helper()
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 9000, Method: "write",
+		Params: map[string]interface{}{
+			"role":    "siona",
+			"path":    path,
+			"content": body,
+		},
+	})
+	if resp.Error != nil {
+		t.Fatalf("seed %s: %v", path, resp.Error.Message)
+	}
+}
+
+type recentObsResult struct {
+	Since   string `json:"since"`
+	Entries []struct {
+		Domain string   `json:"domain"`
+		Path   string   `json:"path"`
+		Line   int      `json:"line"`
+		Date   string   `json:"date"`
+		Tags   []string `json:"tags"`
+		Text   string   `json:"text"`
+	} `json:"entries"`
+	ByDomain map[string]int `json:"by_domain"`
+	ByTag    map[string]int `json:"by_tag"`
+}
+
+func TestRecentObservationsHappyPath(t *testing.T) {
+	ts := newTestServer(t)
+	seedObs(t, ts, "personal/observations.md", strings.Join([]string{
+		"# Observations",
+		"",
+		"- 2026-05-28 [health, milestone]: walked 10k",
+		"- 2026-05-29 [health]: slept 8h",
+		"- 2026-05-20 [old]: pre-window entry",
+		"",
+	}, "\n"))
+	seedObs(t, ts, "work/microsoft/observations.md", strings.Join([]string{
+		"- 2026-05-29 [milestone]: shipped pr",
+		"",
+	}, "\n"))
+
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 1, Method: "recent_observations",
+		Params: map[string]interface{}{"role": "siona", "since": "2026-05-27"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("recent_observations: %v", resp.Error.Message)
+	}
+	var result recentObsResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result.Since != "2026-05-27" {
+		t.Fatalf("since = %q, want 2026-05-27", result.Since)
+	}
+	if len(result.Entries) != 3 {
+		t.Fatalf("entries = %d, want 3 (pre-window must be excluded). got: %+v", len(result.Entries), result.Entries)
+	}
+	// Newest first.
+	if result.Entries[0].Date != "2026-05-29" {
+		t.Fatalf("entries not sorted newest-first: %+v", result.Entries)
+	}
+	// by_domain aggregates: personal=2, work-sub=1 (canonical id from controller).
+	if result.ByDomain["personal"] != 2 || result.ByDomain["work"] != 1 {
+		t.Fatalf("by_domain wrong: %+v", result.ByDomain)
+	}
+	// by_tag aggregates over the filtered set: health=2, milestone=2.
+	if result.ByTag["health"] != 2 || result.ByTag["milestone"] != 2 {
+		t.Fatalf("by_tag wrong: %+v", result.ByTag)
+	}
+	// Tags parsed and trimmed.
+	for _, e := range result.Entries {
+		if e.Path == "personal/observations.md" && e.Date == "2026-05-28" {
+			if len(e.Tags) != 2 || e.Tags[0] != "health" || e.Tags[1] != "milestone" {
+				t.Fatalf("tag parse wrong: %+v", e.Tags)
+			}
+			if e.Text != "walked 10k" {
+				t.Fatalf("text parse wrong: %q", e.Text)
+			}
+		}
+	}
+}
+
+func TestRecentObservationsByTagFilter(t *testing.T) {
+	ts := newTestServer(t)
+	seedObs(t, ts, "personal/observations.md", strings.Join([]string{
+		"- 2026-05-28 [health]: a",
+		"- 2026-05-29 [milestone]: b",
+		"",
+	}, "\n"))
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 1, Method: "recent_observations",
+		Params: map[string]interface{}{"role": "siona", "since": "2026-05-01", "by_tag": "health"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("rpc: %v", resp.Error.Message)
+	}
+	var result recentObsResult
+	json.Unmarshal(resp.Result, &result)
+	if len(result.Entries) != 1 || result.Entries[0].Text != "a" {
+		t.Fatalf("by_tag did not filter: %+v", result.Entries)
+	}
+	if result.ByTag["health"] != 1 || result.ByTag["milestone"] != 0 {
+		t.Fatalf("aggregates reflect post-filter set: %+v", result.ByTag)
+	}
+}
+
+func TestRecentObservationsByDomainFilter(t *testing.T) {
+	ts := newTestServer(t)
+	seedObs(t, ts, "personal/observations.md", "- 2026-05-29 [x]: p\n")
+	seedObs(t, ts, "work/microsoft/observations.md", "- 2026-05-29 [x]: w\n")
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 1, Method: "recent_observations",
+		Params: map[string]interface{}{"role": "siona", "since": "2026-05-01", "by_domain": "personal"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("rpc: %v", resp.Error.Message)
+	}
+	var result recentObsResult
+	json.Unmarshal(resp.Result, &result)
+	if len(result.Entries) != 1 || result.Entries[0].Domain != "personal" {
+		t.Fatalf("by_domain did not isolate: %+v", result.Entries)
+	}
+}
+
+func TestRecentObservationsByDomainUnknownErrors(t *testing.T) {
+	ts := newTestServer(t)
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 1, Method: "recent_observations",
+		Params: map[string]interface{}{"role": "siona", "by_domain": "ghost"},
+	})
+	if resp.Error == nil {
+		t.Fatal("want error for unknown domain id")
+	}
+}
+
+func TestRecentObservationsInvalidSinceRejected(t *testing.T) {
+	ts := newTestServer(t)
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 1, Method: "recent_observations",
+		Params: map[string]interface{}{"role": "siona", "since": "yesterday"},
+	})
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Fatalf("want invalid-params error, got %+v", resp.Error)
+	}
+}
+
+func TestRecentObservationsMissingRole(t *testing.T) {
+	ts := newTestServer(t)
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 1, Method: "recent_observations",
+		Params: map[string]interface{}{},
+	})
+	if resp.Error == nil {
+		t.Fatal("want error for missing role")
+	}
+}
+
+func TestRecentObservationsRBACFiltersUnreadablePaths(t *testing.T) {
+	ts := newTestServer(t)
+	seedObs(t, ts, "personal/observations.md", "- 2026-05-29 [x]: personal entry\n")
+	seedObs(t, ts, "projects/dakota/observations.md", "- 2026-05-29 [x]: dakota entry\n")
+	// project-reader only sees projects/**.
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 1, Method: "recent_observations",
+		Params: map[string]interface{}{"role": "project-reader", "since": "2026-05-01"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("rpc: %v", resp.Error.Message)
+	}
+	var result recentObsResult
+	json.Unmarshal(resp.Result, &result)
+	if len(result.Entries) != 1 || result.Entries[0].Domain != "dakota" {
+		t.Fatalf("RBAC did not filter personal/: %+v", result.Entries)
+	}
+	if _, ok := result.ByDomain["personal"]; ok {
+		t.Fatalf("by_domain leaked unreadable domain: %+v", result.ByDomain)
+	}
+}
+
+func TestRecentObservationsEmptyResultShapesAreNotNull(t *testing.T) {
+	ts := newTestServer(t)
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 1, Method: "recent_observations",
+		Params: map[string]interface{}{"role": "siona", "since": "2099-01-01"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("rpc: %v", resp.Error.Message)
+	}
+	// Raw json must contain `"entries":[]`, `"by_domain":{}`, `"by_tag":{}`.
+	raw := string(resp.Result)
+	for _, want := range []string{`"entries":[]`, `"by_domain":{}`, `"by_tag":{}`} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("missing %s in %s", want, raw)
+		}
+	}
+}
+
+func TestRecentObservationsDefaultSinceIs7Days(t *testing.T) {
+	ts := newTestServer(t)
+	// One entry from 30 days ago (out of default window), one from today.
+	old := time.Now().UTC().AddDate(0, 0, -30).Format("2006-01-02")
+	today := time.Now().UTC().Format("2006-01-02")
+	seedObs(t, ts, "personal/observations.md", fmt.Sprintf("- %s [x]: old\n- %s [x]: new\n", old, today))
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 1, Method: "recent_observations",
+		Params: map[string]interface{}{"role": "siona"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("rpc: %v", resp.Error.Message)
+	}
+	var result recentObsResult
+	json.Unmarshal(resp.Result, &result)
+	if len(result.Entries) != 1 || result.Entries[0].Text != "new" {
+		t.Fatalf("default window did not pick last 7 days: %+v", result.Entries)
+	}
+	if result.Since == "" {
+		t.Fatal("since not echoed in response")
+	}
+}
+
+func TestRecentObservationsSkipsFencedBlocks(t *testing.T) {
+	ts := newTestServer(t)
+	body := strings.Join([]string{
+		"- 2026-05-29 [real]: actual entry",
+		"```",
+		"- 2026-05-29 [fake]: inside a code fence",
+		"```",
+		"",
+	}, "\n")
+	seedObs(t, ts, "personal/observations.md", body)
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 1, Method: "recent_observations",
+		Params: map[string]interface{}{"role": "siona", "since": "2026-05-01"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("rpc: %v", resp.Error.Message)
+	}
+	var result recentObsResult
+	json.Unmarshal(resp.Result, &result)
+	if len(result.Entries) != 1 || result.Entries[0].Tags[0] != "real" {
+		t.Fatalf("fenced block leaked or real entry dropped: %+v", result.Entries)
 	}
 }

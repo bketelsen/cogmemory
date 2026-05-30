@@ -72,6 +72,30 @@ func TestControllerGetIncludesSubdomains(t *testing.T) {
 	}
 }
 
+func TestControllerObservationsResolves(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, goodManifest)
+	c, _ := domain.New(dir)
+	targets := c.Observations()
+	// personal + work-sub declare observations. work and cog-meta don't.
+	var got []string
+	for _, t := range targets {
+		got = append(got, t.Domain+":"+t.Path)
+	}
+	want := []string{
+		"personal:personal/observations.md",
+		"work-sub:work/microsoft/team/observations.md",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("Observations = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("Observations[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 func TestControllerActionItemsResolves(t *testing.T) {
 	dir := t.TempDir()
 	writeManifest(t, dir, goodManifest)

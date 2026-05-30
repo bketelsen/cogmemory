@@ -879,10 +879,13 @@ type Observation struct {
 // obsParseRE captures (date, tags, text) from a validated observation line.
 var obsParseRE = regexp.MustCompile(`^-\s+(\d{4}-\d{2}-\d{2})\s+\[([^\]]+)\]:\s*(.+?)\s*$`)
 
-// RecentObservations reads relPath and returns parsed observations whose
+// RecentObservationsForFile reads relPath and returns parsed observations whose
 // date is >= sinceDate (YYYY-MM-DD lexical compare). sinceDate "" disables
 // the filter. Missing file → (nil, nil). Non-conforming lines are skipped.
-func (s *MemoryStore) RecentObservations(relPath, sinceDate string) ([]Observation, error) {
+// Single-file scan helper used by domain_summary. The richer multi-file
+// aggregator with by_tag/by_domain support is RecentObservations() in
+// observations.go (the recent_observations RPC).
+func (s *MemoryStore) RecentObservationsForFile(relPath, sinceDate string) ([]Observation, error) {
 	abs, err := s.absPath(relPath)
 	if err != nil {
 		return nil, err
