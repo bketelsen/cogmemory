@@ -147,6 +147,8 @@ func (srv *Server) dispatch(line []byte) Response {
 		return srv.handleList(req)
 	case "open_actions":
 		return srv.handleOpenActions(req)
+	case "session_brief":
+		return srv.handleSessionBrief(req)
 	case "domains.list":
 		return srv.handleDomainsList(req)
 	case "domains.get":
