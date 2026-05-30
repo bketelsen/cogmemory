@@ -239,6 +239,91 @@ func TestAppendObsEnforcementViaRPC(t *testing.T) {
 	}
 }
 
+// TestAppendSectionViaRPC locks in the JSON-RPC wire contract for the
+// optional `section` param. Regression guard: a stale daemon binary that
+// predated the section field silently dropped it during JSON unmarshal and
+// landed every append at EOF — this test fails fast if the wire schema or
+// dispatcher ever loses the param again.
+func TestAppendSectionViaRPC(t *testing.T) {
+	ts := newTestServer(t)
+
+	call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 1, Method: "write",
+		Params: map[string]interface{}{
+			"role":    "siona",
+			"path":    "action-items.md",
+			"content": "# x\n\n## Open\n\n## Completed\n",
+		},
+	})
+
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 2, Method: "append",
+		Params: map[string]interface{}{
+			"role":    "siona",
+			"path":    "action-items.md",
+			"text":    "- [ ] under Open\n",
+			"section": "## Open",
+		},
+	})
+	if resp.Error != nil {
+		t.Fatalf("section append rejected: %v", resp.Error.Message)
+	}
+
+	resp = call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 3, Method: "read",
+		Params: map[string]interface{}{"role": "siona", "path": "action-items.md"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("read failed: %v", resp.Error.Message)
+	}
+	var got struct {
+		Content string `json:"content"`
+	}
+	b, _ := json.Marshal(resp.Result)
+	_ = json.Unmarshal(b, &got)
+
+	openIdx := strings.Index(got.Content, "## Open")
+	completedIdx := strings.Index(got.Content, "## Completed")
+	itemIdx := strings.Index(got.Content, "- [ ] under Open")
+	if openIdx < 0 || completedIdx < 0 || itemIdx < 0 {
+		t.Fatalf("missing expected markers in:\n%s", got.Content)
+	}
+	if !(openIdx < itemIdx && itemIdx < completedIdx) {
+		t.Fatalf("section param ignored — item landed outside ## Open. Content:\n%s", got.Content)
+	}
+
+	// Bare title (no leading '#') must also work.
+	call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 4, Method: "write",
+		Params: map[string]interface{}{
+			"role":    "siona",
+			"path":    "bare.md",
+			"content": "## Open\n\n## Completed\n",
+		},
+	})
+	resp = call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 5, Method: "append",
+		Params: map[string]interface{}{
+			"role":    "siona",
+			"path":    "bare.md",
+			"text":    "- [ ] bare\n",
+			"section": "Open",
+		},
+	})
+	if resp.Error != nil {
+		t.Fatalf("bare-title section append rejected: %v", resp.Error.Message)
+	}
+	resp = call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 6, Method: "read",
+		Params: map[string]interface{}{"role": "siona", "path": "bare.md"},
+	})
+	b, _ = json.Marshal(resp.Result)
+	_ = json.Unmarshal(b, &got)
+	if i, c, x := strings.Index(got.Content, "## Open"), strings.Index(got.Content, "## Completed"), strings.Index(got.Content, "- [ ] bare"); !(i < x && x < c) {
+		t.Fatalf("bare-title section param ignored. Content:\n%s", got.Content)
+	}
+}
+
 func TestOutlineMethod(t *testing.T) {
 	ts := newTestServer(t)
 	call(t, ts.socketPath, rpcRequest{
