@@ -1197,3 +1197,109 @@ func TestRecentObservationsSkipsFencedBlocks(t *testing.T) {
 		t.Fatalf("fenced block leaked or real entry dropped: %+v", result.Entries)
 	}
 }
+
+// --- scenario_check ---
+
+func writeScenario(t *testing.T, root, rel, status, checkBy string) {
+	t.Helper()
+	body := "---\ntype: scenario\n"
+	if status != "" {
+		body += "status: " + status + "\n"
+	}
+	if checkBy != "" {
+		body += "check-by: " + checkBy + "\n"
+	}
+	body += "---\n# scenario\n"
+	abs := filepath.Join(root, rel)
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(abs, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type scenarioResult struct {
+	Scenarios []struct {
+		Path           string `json:"path"`
+		CheckBy        string `json:"check_by"`
+		Status         string `json:"status"`
+		DaysUntilCheck int    `json:"days_until_check"`
+	} `json:"scenarios"`
+}
+
+func TestScenarioCheckReturnsScheduledEntries(t *testing.T) {
+	ts := newTestServer(t)
+	writeScenario(t, ts.memoryRoot, "cog-meta/scenarios/overdue.md", "active", "2000-01-01")
+	writeScenario(t, ts.memoryRoot, "cog-meta/scenarios/future.md", "active", "2099-12-31")
+	writeScenario(t, ts.memoryRoot, "cog-meta/scenarios/resolved.md", "resolved", "2099-12-31")
+
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0",
+		ID:      1,
+		Method:  "scenario_check",
+		Params:  map[string]interface{}{"role": "siona"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("scenario_check error: %v", resp.Error.Message)
+	}
+	var got scenarioResult
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got.Scenarios) != 2 {
+		t.Fatalf("got %d scenarios, want 2: %#v", len(got.Scenarios), got.Scenarios)
+	}
+	if got.Scenarios[0].Path != "cog-meta/scenarios/future.md" || got.Scenarios[0].Status != "active" || got.Scenarios[0].DaysUntilCheck <= 0 {
+		t.Errorf("future entry = %#v", got.Scenarios[0])
+	}
+	if got.Scenarios[1].Path != "cog-meta/scenarios/overdue.md" || got.Scenarios[1].Status != "overdue" || got.Scenarios[1].DaysUntilCheck >= 0 {
+		t.Errorf("overdue entry = %#v", got.Scenarios[1])
+	}
+}
+
+func TestScenarioCheckEmptyResultIsArray(t *testing.T) {
+	ts := newTestServer(t)
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 1, Method: "scenario_check",
+		Params: map[string]interface{}{"role": "siona"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("scenario_check error: %v", resp.Error.Message)
+	}
+	// JSON must serialize empty slice as [], not null.
+	if !strings.Contains(string(resp.Result), `"scenarios":[]`) {
+		t.Fatalf("expected scenarios:[], got %s", string(resp.Result))
+	}
+}
+
+func TestScenarioCheckMissingRole(t *testing.T) {
+	ts := newTestServer(t)
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 1, Method: "scenario_check",
+		Params: map[string]interface{}{},
+	})
+	if resp.Error == nil || resp.Error.Code != rpc.CodeInvalidParams {
+		t.Fatalf("want invalid params, got %+v", resp.Error)
+	}
+}
+
+func TestScenarioCheckRBACFiltersUnreadable(t *testing.T) {
+	ts := newTestServer(t)
+	writeScenario(t, ts.memoryRoot, "cog-meta/scenarios/s1.md", "active", "2099-12-31")
+	// project-reader has read on projects/** only, deny everywhere else.
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 1, Method: "scenario_check",
+		Params: map[string]interface{}{"role": "project-reader"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("scenario_check: %v", resp.Error.Message)
+	}
+	var got scenarioResult
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got.Scenarios) != 0 {
+		t.Fatalf("project-reader should see 0 scenarios, got %d: %#v", len(got.Scenarios), got.Scenarios)
+	}
+}

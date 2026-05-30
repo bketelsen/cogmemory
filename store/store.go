@@ -1507,3 +1507,164 @@ func (s *MemoryStore) runGit(args ...string) (string, error) {
 	}
 	return strings.TrimSpace(string(out)), nil
 }
+
+// ScenarioEntry describes one active scenario file in cog-meta/scenarios/.
+// Status is one of "active", "due_now", "overdue". DaysUntilCheck is negative
+// for overdue scenarios, zero for due_now (today == check-by), positive for
+// active scenarios still ahead of their check date.
+type ScenarioEntry struct {
+	Path           string `json:"path"`
+	CheckBy        string `json:"check_by"`
+	Status         string `json:"status"`
+	DaysUntilCheck int    `json:"days_until_check"`
+}
+
+// scenarioFrontmatter mirrors the fields scenario_check cares about.
+// All other frontmatter fields are ignored.
+type scenarioFrontmatter struct {
+	Status  string `yaml:"status"`
+	CheckBy string `yaml:"check-by"`
+}
+
+// ScenarioCheck walks cog-meta/scenarios/*.md and returns one entry per
+// scenario file whose frontmatter declares status: active (or omits status —
+// treated as active for backward compatibility). Files without a check-by
+// date, with an unparseable check-by, or with a non-active status are
+// skipped silently. Returns an empty slice (not nil) when the scenarios
+// directory is absent.
+//
+// "today" is passed in so callers can pin time for tests; production callers
+// pass time.Now().UTC().
+func (s *MemoryStore) ScenarioCheck(today time.Time) ([]ScenarioEntry, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	dir := filepath.Join(s.root, "cog-meta", "scenarios")
+	info, err := os.Stat(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []ScenarioEntry{}, nil
+		}
+		return nil, fmt.Errorf("store: scenario check: %w", err)
+	}
+	if !info.IsDir() {
+		return []ScenarioEntry{}, nil
+	}
+
+	// Normalize today to midnight UTC so day-deltas are integer days.
+	today = time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, time.UTC)
+
+	entries := []ScenarioEntry{}
+	walkErr := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".md") {
+			return nil
+		}
+		if strings.HasSuffix(path, ".tmp") {
+			return nil
+		}
+		relPath, _ := filepath.Rel(s.root, path)
+		relPath = filepath.ToSlash(relPath)
+
+		f, openErr := os.Open(path)
+		if openErr != nil {
+			return nil
+		}
+		_ = lockShared(f)
+		data, readErr := io.ReadAll(f)
+		unlock(f)
+		f.Close()
+		if readErr != nil {
+			return nil
+		}
+
+		fm, ok := scenarioExtractFrontmatter(data)
+		if !ok {
+			return nil
+		}
+		var parsed scenarioFrontmatter
+		if err := yaml.Unmarshal(fm, &parsed); err != nil {
+			return nil
+		}
+		// Only active scenarios are scheduled. Empty status is treated
+		// as active so older files without explicit status still surface.
+		status := strings.TrimSpace(parsed.Status)
+		if status != "" && status != "active" {
+			return nil
+		}
+		checkBy := strings.TrimSpace(parsed.CheckBy)
+		if checkBy == "" {
+			return nil
+		}
+		check, err := time.Parse("2006-01-02", checkBy)
+		if err != nil {
+			return nil
+		}
+		check = time.Date(check.Year(), check.Month(), check.Day(), 0, 0, 0, 0, time.UTC)
+
+		days := int(check.Sub(today).Hours() / 24)
+		var entryStatus string
+		switch {
+		case days < 0:
+			entryStatus = "overdue"
+		case days == 0:
+			entryStatus = "due_now"
+		default:
+			entryStatus = "active"
+		}
+		entries = append(entries, ScenarioEntry{
+			Path:           relPath,
+			CheckBy:        checkBy,
+			Status:         entryStatus,
+			DaysUntilCheck: days,
+		})
+		return nil
+	})
+	if walkErr != nil {
+		return nil, fmt.Errorf("store: scenario check: %w", walkErr)
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
+	return entries, nil
+}
+
+// scenarioExtractFrontmatter pulls the YAML block delimited by leading "---"
+// / "---" from a markdown file body. Returns (nil, false) if no frontmatter
+// is present. A single leading HTML comment line (e.g. an L0 hint) is
+// skipped so files that prepend one still parse. Local to scenario_check to
+// avoid coupling with other in-flight RPC branches that introduce a shared
+// helper; consolidate once those land.
+func scenarioExtractFrontmatter(data []byte) ([]byte, bool) {
+	text := strings.TrimPrefix(string(data), "\ufeff")
+	lines := strings.Split(text, "\n")
+	i := 0
+	for i < len(lines) && strings.TrimSpace(lines[i]) == "" {
+		i++
+	}
+	if i < len(lines) {
+		t := strings.TrimSpace(lines[i])
+		if strings.HasPrefix(t, "<!--") && strings.HasSuffix(t, "-->") {
+			i++
+		}
+	}
+	for i < len(lines) && strings.TrimSpace(lines[i]) == "" {
+		i++
+	}
+	if i >= len(lines) || strings.TrimSpace(lines[i]) != "---" {
+		return nil, false
+	}
+	start := i + 1
+	for j := start; j < len(lines); j++ {
+		if strings.TrimSpace(lines[j]) == "---" {
+			return []byte(strings.Join(lines[start:j], "\n")), true
+		}
+	}
+	return nil, false
+}

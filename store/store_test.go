@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/bketelsen/cogmemory/store"
 )
@@ -1007,5 +1008,71 @@ func TestGitUnknownOp(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unknown op") {
 		t.Errorf("error should mention unknown op, got: %v", err)
+	}
+}
+
+func scenarioFile(check string, status string) string {
+	lines := []string{
+		"---",
+		"type: scenario",
+	}
+	if status != "" {
+		lines = append(lines, "status: "+status)
+	}
+	if check != "" {
+		lines = append(lines, "check-by: "+check)
+	}
+	lines = append(lines,
+		"---",
+		"# Scenario body",
+		"")
+	return strings.Join(lines, "\n")
+}
+
+func TestScenarioCheckClassifiesByDate(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := store.New(dir)
+
+	today := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+
+	writeFile(t, dir, "cog-meta/scenarios/overdue.md", scenarioFile("2026-05-20", "active"))
+	writeFile(t, dir, "cog-meta/scenarios/due-now.md", scenarioFile("2026-06-01", "active"))
+	writeFile(t, dir, "cog-meta/scenarios/upcoming.md", scenarioFile("2026-06-15", "active"))
+	writeFile(t, dir, "cog-meta/scenarios/no-status.md", scenarioFile("2026-06-10", ""))
+	writeFile(t, dir, "cog-meta/scenarios/resolved.md", scenarioFile("2026-05-01", "resolved"))
+	writeFile(t, dir, "cog-meta/scenarios/no-check-by.md", scenarioFile("", "active"))
+	writeFile(t, dir, "cog-meta/scenarios/bad-date.md", scenarioFile("not-a-date", "active"))
+	writeFile(t, dir, "cog-meta/scenarios/no-frontmatter.md", "# bare scenario\n")
+	writeFile(t, dir, "cog-meta/scenarios/notes.txt", "irrelevant\n")
+	writeFile(t, dir, "cog-meta/other.md", scenarioFile("2026-06-01", "active"))
+
+	got, err := s.ScenarioCheck(today)
+	if err != nil {
+		t.Fatalf("ScenarioCheck: %v", err)
+	}
+
+	want := []store.ScenarioEntry{
+		{Path: "cog-meta/scenarios/due-now.md", CheckBy: "2026-06-01", Status: "due_now", DaysUntilCheck: 0},
+		{Path: "cog-meta/scenarios/no-status.md", CheckBy: "2026-06-10", Status: "active", DaysUntilCheck: 9},
+		{Path: "cog-meta/scenarios/overdue.md", CheckBy: "2026-05-20", Status: "overdue", DaysUntilCheck: -12},
+		{Path: "cog-meta/scenarios/upcoming.md", CheckBy: "2026-06-15", Status: "active", DaysUntilCheck: 14},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ScenarioCheck()\n got = %#v\nwant = %#v", got, want)
+	}
+}
+
+func TestScenarioCheckMissingDirReturnsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := store.New(dir)
+	got, err := s.ScenarioCheck(time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("ScenarioCheck: %v", err)
+	}
+	if got == nil {
+		t.Fatal("ScenarioCheck returned nil slice, want empty slice")
+	}
+	if len(got) != 0 {
+		t.Fatalf("ScenarioCheck returned %d entries, want 0", len(got))
 	}
 }
