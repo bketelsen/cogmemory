@@ -285,7 +285,12 @@ type openActionsParams struct {
 func (srv *Server) handleOpenActions(req Request) Response {
 	var p openActionsParams
 	if req.Params != nil {
-		json.Unmarshal(req.Params, &p) //nolint:errcheck
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return errorResponse(req.ID, CodeInvalidParams, "open_actions: invalid params: "+err.Error())
+		}
+	}
+	if p.Role == "" {
+		return errorResponse(req.ID, CodeInvalidParams, "open_actions: role required")
 	}
 	items, err := srv.store.OpenActions()
 	if err != nil {

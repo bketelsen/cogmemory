@@ -637,6 +637,9 @@ func (s *MemoryStore) OpenActions() ([]OpenActionItem, error) {
 
 		_ = lockShared(f)
 		scanner := bufio.NewScanner(f)
+		// Allow up to 1MiB per line so a giant embedded URL or pasted blob
+		// doesn't silently truncate the file scan with bufio.ErrTooLong.
+		scanner.Buffer(make([]byte, 64*1024), 1<<20)
 		lineNo := 0
 		inComment := false
 		inFence := false
@@ -772,8 +775,11 @@ func (s *MemoryStore) List() ([]string, error) {
 	return paths, nil
 }
 
+// isActionItemsPath returns true if relPath is the top-level or a nested
+// action-items.md file. relPath is OS-native (filepath.Rel from scanFiles).
 func isActionItemsPath(relPath string) bool {
-	return relPath == "action-items.md" || strings.HasSuffix(relPath, string(filepath.Separator)+"action-items.md") || strings.HasSuffix(relPath, "/action-items.md")
+	return relPath == "action-items.md" ||
+		strings.HasSuffix(relPath, string(filepath.Separator)+"action-items.md")
 }
 
 func skipActionLine(trimmed string, inComment, inFence *bool) bool {
