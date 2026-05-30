@@ -612,27 +612,40 @@ func (s *MemoryStore) Search(query string) ([]SearchResult, error) {
 	return results, nil
 }
 
-// OpenActions returns unchecked markdown tasks from all action-items.md files.
-func (s *MemoryStore) OpenActions() ([]OpenActionItem, error) {
+// ActionTarget is one resolved action-items file the store should scan.
+// The Domain field is the canonical domain id supplied by the caller
+// (typically the domain controller); the store no longer infers it from
+// the path's leaf basename.
+type ActionTarget struct {
+	Domain string
+	Path   string // relative path under root, POSIX-style
+}
+
+// OpenActions scans the supplied action-items targets and returns unchecked
+// markdown tasks from each. Missing files are skipped silently; malformed
+// scans surface as errors. Item.Domain is taken from the target, not from
+// the leaf directory name.
+func (s *MemoryStore) OpenActions(targets []ActionTarget) ([]OpenActionItem, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	files, err := s.scanFiles()
-	if err != nil {
-		return nil, fmt.Errorf("store: open actions: %w", err)
-	}
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].relPath < files[j].relPath
-	})
+	// Sort by path for deterministic output regardless of target order.
+	sorted := make([]ActionTarget, len(targets))
+	copy(sorted, targets)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Path < sorted[j].Path })
 
 	items := []OpenActionItem{}
-	for _, sf := range files {
-		if !isActionItemsPath(sf.relPath) {
-			continue
-		}
-		f, err := os.Open(sf.absPath)
+	for _, t := range sorted {
+		abs, err := s.absPath(t.Path)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("store: open actions: %w", err)
+		}
+		f, err := os.Open(abs)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, fmt.Errorf("store: open actions: open %q: %w", t.Path, err)
 		}
 
 		_ = lockShared(f)
@@ -653,7 +666,7 @@ func (s *MemoryStore) OpenActions() ([]OpenActionItem, error) {
 			if !strings.HasPrefix(trimmed, "- [ ] ") {
 				continue
 			}
-			if item, ok := parseOpenActionItem(sf.relPath, lineNo, trimmed); ok {
+			if item, ok := parseOpenActionItem(t.Domain, t.Path, lineNo, trimmed); ok {
 				items = append(items, item)
 			}
 		}
@@ -661,7 +674,7 @@ func (s *MemoryStore) OpenActions() ([]OpenActionItem, error) {
 		unlock(f)
 		f.Close()
 		if scanErr != nil {
-			return nil, fmt.Errorf("store: open actions: scan %q: %w", sf.relPath, scanErr)
+			return nil, fmt.Errorf("store: open actions: scan %q: %w", t.Path, scanErr)
 		}
 	}
 	return items, nil
@@ -775,12 +788,9 @@ func (s *MemoryStore) List() ([]string, error) {
 	return paths, nil
 }
 
-// isActionItemsPath returns true if relPath is the top-level or a nested
-// action-items.md file. relPath is OS-native (filepath.Rel from scanFiles).
-func isActionItemsPath(relPath string) bool {
-	return relPath == "action-items.md" ||
-		strings.HasSuffix(relPath, string(filepath.Separator)+"action-items.md")
-}
+// isActionItemsPath is no longer used internally — action-items files come
+// from the domain controller now. Kept commented out as a marker for the
+// refactor; the function and its tests were removed in feat/domain-controller.
 
 func skipActionLine(trimmed string, inComment, inFence *bool) bool {
 	if *inComment {
@@ -812,14 +822,14 @@ func isFenceLine(trimmed string) bool {
 	return strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~")
 }
 
-func parseOpenActionItem(path string, line int, raw string) (OpenActionItem, bool) {
+func parseOpenActionItem(domain, path string, line int, raw string) (OpenActionItem, bool) {
 	body := strings.TrimSpace(strings.TrimPrefix(raw, "- [ ] "))
 	if body == "" {
 		return OpenActionItem{}, false
 	}
 	parts := strings.Split(body, "|")
 	item := OpenActionItem{
-		Domain: domainFromActionPath(path),
+		Domain: domain,
 		Path:   path,
 		Line:   line,
 		Text:   strings.TrimSpace(parts[0]),
@@ -843,17 +853,6 @@ func parseOpenActionItem(path string, line int, raw string) (OpenActionItem, boo
 		}
 	}
 	return item, true
-}
-
-func domainFromActionPath(path string) string {
-	if path == "action-items.md" {
-		return ""
-	}
-	parent := filepath.Dir(path)
-	if parent == "." || parent == string(filepath.Separator) {
-		return ""
-	}
-	return filepath.Base(parent)
 }
 
 // isObsPath returns true if the path looks like an observations file.

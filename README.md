@@ -14,7 +14,14 @@ standalone Go service that can be installed per user and managed by systemd.
 
 - JSON-RPC 2.0 over Unix Domain Socket
 - Methods: `read`, `write`, `append`, `patch`, `search`, `stats`, `l0index`,
-  `list`, `open_actions`, `health`
+  `list`, `open_actions`, `domains.list`, `domains.get`, `health`
+- Canonical domain registry loaded from `<memory_root>/domains.yml`
+  (hot-reload on file change). The daemon exposes it via `domains.list` /
+  `domains.get`, and `open_actions` uses it to enumerate action-items
+  files instead of inferring them from leaf directory names. Pass
+  `{"domain": "<id>"}` to `open_actions` to scope the scan to a single
+  domain. Writes that land under a declared domain but use an undeclared
+  file basename emit a warning log line (hygiene signal, not blocking).
 - File locking and atomic writes
 - Glob-pattern RBAC by role
 - Optional systemd notify/watchdog support

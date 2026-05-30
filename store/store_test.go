@@ -815,7 +815,11 @@ func TestOpenActionsReturnsUncheckedItemsFromActionFiles(t *testing.T) {
 	writeFile(t, dir, "personal/action-items.md", "- [ ] Buy coffee | pri:low\n")
 	writeFile(t, dir, "notes.md", "- [ ] not an action file\n")
 
-	items, err := s.OpenActions()
+	items, err := s.OpenActions([]store.ActionTarget{
+		{Domain: "dakota", Path: "projects/dakota/action-items.md"},
+		{Domain: "personal", Path: "personal/action-items.md"},
+		{Domain: "missing", Path: "no/such/action-items.md"},
+	})
 	if err != nil {
 		t.Fatalf("OpenActions: %v", err)
 	}
@@ -849,7 +853,7 @@ func TestOpenActionsEmptyResultIsNonNil(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := store.New(dir)
 
-	items, err := s.OpenActions()
+	items, err := s.OpenActions(nil)
 	if err != nil {
 		t.Fatalf("OpenActions: %v", err)
 	}

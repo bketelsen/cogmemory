@@ -3,7 +3,9 @@ package rpc
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 
+	"github.com/bketelsen/cogmemory/domain"
 	"github.com/bketelsen/cogmemory/store"
 )
 
@@ -65,6 +67,7 @@ func (srv *Server) handleWrite(req Request) Response {
 	if !srv.rbac.Check(p.Role, p.Path, "write") {
 		return errorResponse(req.ID, CodeRBACDenied, fmt.Sprintf("write denied for role %q on %q", p.Role, p.Path))
 	}
+	srv.warnIfMalformed("write", p.Path)
 	if err := srv.store.Write(p.Path, p.Content); err != nil {
 		return errorResponse(req.ID, CodeStoreError, "write: "+err.Error())
 	}
@@ -93,6 +96,7 @@ func (srv *Server) handleAppend(req Request) Response {
 	if !srv.rbac.Check(p.Role, p.Path, "write") {
 		return errorResponse(req.ID, CodeRBACDenied, fmt.Sprintf("append denied for role %q on %q", p.Role, p.Path))
 	}
+	srv.warnIfMalformed("append", p.Path)
 	if err := srv.store.AppendSection(p.Path, p.Section, p.Text); err != nil {
 		return errorResponse(req.ID, CodeStoreError, "append: "+err.Error())
 	}
@@ -280,6 +284,9 @@ func (srv *Server) handleList(req Request) Response {
 
 type openActionsParams struct {
 	baseParams
+	// Domain, when set, restricts the scan to that single domain id.
+	// Reduces wire chatter on busy boards.
+	Domain string `json:"domain,omitempty"`
 }
 
 func (srv *Server) handleOpenActions(req Request) Response {
@@ -292,7 +299,32 @@ func (srv *Server) handleOpenActions(req Request) Response {
 	if p.Role == "" {
 		return errorResponse(req.ID, CodeInvalidParams, "open_actions: role required")
 	}
-	items, err := srv.store.OpenActions()
+
+	var targets []store.ActionTarget
+	if srv.controller != nil {
+		var ctrlTargets []domain.ActionTarget
+		if p.Domain != "" {
+			d, err := srv.controller.Get(p.Domain)
+			if err != nil {
+				return errorResponse(req.ID, CodeInvalidParams, "open_actions: "+err.Error())
+			}
+			// Only include action-items if the domain declares it; missing on
+			// disk is fine (the store skips), but undeclared is a caller error.
+			path, err := srv.controller.ResolveFile(d.ID, "action-items")
+			if err != nil {
+				return errorResponse(req.ID, CodeInvalidParams, "open_actions: "+err.Error())
+			}
+			ctrlTargets = []domain.ActionTarget{{Domain: d.ID, Path: path}}
+		} else {
+			ctrlTargets = srv.controller.ActionItems()
+		}
+		targets = make([]store.ActionTarget, 0, len(ctrlTargets))
+		for _, t := range ctrlTargets {
+			targets = append(targets, store.ActionTarget{Domain: t.Domain, Path: t.Path})
+		}
+	}
+
+	items, err := srv.store.OpenActions(targets)
 	if err != nil {
 		return errorResponse(req.ID, CodeStoreError, "open_actions: "+err.Error())
 	}
@@ -304,6 +336,66 @@ func (srv *Server) handleOpenActions(req Request) Response {
 	}
 	return okResponse(req.ID, map[string]interface{}{
 		"items": filtered,
+	})
+}
+
+// --- domains.list / domains.get ---
+
+type domainsListParams struct {
+	baseParams
+}
+
+func (srv *Server) handleDomainsList(req Request) Response {
+	var p domainsListParams
+	if req.Params != nil {
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return errorResponse(req.ID, CodeInvalidParams, "domains.list: invalid params: "+err.Error())
+		}
+	}
+	if srv.controller == nil {
+		return errorResponse(req.ID, CodeStoreError, "domains.list: controller unavailable")
+	}
+	all := srv.controller.List()
+	// Filter by RBAC: a role only sees domains whose path it can read.
+	visible := make([]domain.Domain, 0, len(all))
+	for _, d := range all {
+		if srv.rbac.Check(p.Role, d.Path, "read") {
+			visible = append(visible, d)
+		}
+	}
+	return okResponse(req.ID, map[string]interface{}{
+		"domains": visible,
+	})
+}
+
+type domainsGetParams struct {
+	baseParams
+	ID string `json:"id"`
+}
+
+func (srv *Server) handleDomainsGet(req Request) Response {
+	var p domainsGetParams
+	if req.Params != nil {
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return errorResponse(req.ID, CodeInvalidParams, "domains.get: invalid params: "+err.Error())
+		}
+	}
+	if p.ID == "" {
+		return errorResponse(req.ID, CodeInvalidParams, "domains.get: id is required")
+	}
+	if srv.controller == nil {
+		return errorResponse(req.ID, CodeStoreError, "domains.get: controller unavailable")
+	}
+	d, err := srv.controller.Get(p.ID)
+	if err != nil {
+		return errorResponse(req.ID, CodeStoreError, "domains.get: "+err.Error())
+	}
+	if !srv.rbac.Check(p.Role, d.Path, "read") {
+		return errorResponse(req.ID, CodeRBACDenied,
+			fmt.Sprintf("domains.get denied for role %q on %q", p.Role, d.Path))
+	}
+	return okResponse(req.ID, map[string]interface{}{
+		"domain": d,
 	})
 }
 
@@ -344,4 +436,16 @@ func (srv *Server) handleGit(req Request) Response {
 	return okResponse(req.ID, map[string]interface{}{
 		"output": output,
 	})
+}
+
+// warnIfMalformed emits a log warning when a write/append targets a path that
+// lives under a declared domain but isn't in that domain's `files` list.
+// Pure hygiene signal — never blocks the operation.
+func (srv *Server) warnIfMalformed(op, path string) {
+	if srv.controller == nil {
+		return
+	}
+	if err := srv.controller.ValidateWrite(path); err != nil {
+		log.Printf("cogmemory: %s warning: %v", op, err)
+	}
 }
