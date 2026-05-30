@@ -585,6 +585,7 @@ loops in §1, §3, §4, §5, §5b, §5c, §6 each collapsed into a single
 typed RPC and the per-domain INDEX rebuild bounded by `domain_summary`
 rather than N raw reads.
 
+---
 
 ## `history`
 
