@@ -312,7 +312,7 @@ Range: **~10–14 → ~8 round-trips**, with the satellite-scaling cliff removed
 
 ---
 
-## housekeeping
+## `housekeeping`
 
 Source: <https://github.com/marciopuga/cog/blob/main/.claude/commands/housekeeping.md>
 
@@ -586,7 +586,7 @@ typed RPC and the per-domain INDEX rebuild bounded by `domain_summary`
 rather than N raw reads.
 
 
-## history
+## `history`
 
 Source: <https://github.com/marciopuga/cog/blob/main/.claude/commands/history.md>
 
@@ -763,6 +763,100 @@ Range: **~20–40 → ~10–14 round-trips**, with the domain-count scaling clif
 
 ---
 
+## `foresight`
+
+Source: [cog-prime `.claude/commands/foresight.md`](https://github.com/marciopuga/cog/blob/main/.claude/commands/foresight.md). Forward-looking synthesis: scan broadly across every domain, detect cross-domain convergences, classify action-item velocity (accelerating / cruising / stalling / dormant), check timing windows from calendar + entities, project patterns forward, then write *one* strategic nudge to `cog-meta/foresight-nudge.md`. Foresight is read-only on every memory file except the nudge target; the round-trip cost lives entirely in the orientation/scan fan-out, which today scales linearly with domain count and observation volume.
+
+### 1. Original orientation block
+
+From `## Memory Files` (foresight.md):
+
+> "Read broadly — this is a scan, not a focused lookup:
+> 1. Read `memory/domains.yml` to discover all active domains
+> 2. For each domain, read `hot-memory.md` and `action-items.md` (if they exist)
+> 3. Also read:
+>    - `memory/hot-memory.md` (cross-domain strategic context)
+>    - `memory/personal/entities.md` (upcoming birthdays, relationships)
+>    - `memory/personal/calendar.md` (what's coming up)
+>    - `memory/personal/health.md` (health trajectory)
+>    - `memory/cog-meta/briefing-bridge.md` (housekeeping findings)
+>    - Recent observations across all domains (last 7 days)
+>    - Thread current-state sections — what narratives are actively unfolding?"
+
+Concrete shape on a 4-domain setup: **1 `domains.yml` read + 4 × 2 per-domain reads (hot-memory + action-items) + 1 global hot-memory + 3 personal files (entities, calendar, health) + 1 briefing-bridge + 4 `observations.md` reads filtered to 7d + N thread-file reads** ≈ **~18–22 ops before any synthesis happens**, scaling linearly with domain count and thread count.
+
+### 2. Rewritten orientation block
+
+Four RPC calls cover the scan envelope:
+
+1. `session_brief(role="foresight")` → `hot_memory`, `patterns`, the full `domains` slice (with `action_counts` per domain), and the cog-meta `patterns.md` body. Replaces the `domains.yml` read, the global `memory/hot-memory.md` read, and the per-domain `hot-memory.md` + `action-items.md` fan-out in one envelope. Driving fields: **`domains`** (the manifest foresight needs to project across) and **`action_counts`** (input to §2 velocity classification before any per-domain action-items read).
+2. `recent_observations(role="foresight", since="7d")` → the "recent observations across all domains" bullet collapses into one call returning `{domain, path, date, tag, snippet}` records. Driving field: the record list itself — foresight clusters these by domain/topic to feed §1 convergence detection and §2 stall detection.
+3. `housekeeping_scan(role="foresight")` → carries `briefing_bridge` (the cog-meta findings foresight is told to read) plus `changed_recently` (foresight's "what's actively unfolding" proxy — files mutated since last housekeeping pass are the live narrative threads). Replaces the standalone `cog-meta/briefing-bridge.md` read and removes the need to enumerate thread files by hand.
+4. `scenario_check(role="foresight")` → `due_now` / `overdue` / `active` with `days_until_check`. Feeds §3 timing awareness and §4 pattern projection's scenario-candidate detection. Foresight is the natural *upstream* consumer of `scenario_check`: reflect closes scenario windows after they trigger; foresight surfaces the ones that should open next.
+
+Three direct `cog_read` calls remain because they're personal-domain detail files with semantics no RPC carries:
+
+- `personal/calendar.md` — upcoming-event windows (§3 timing awareness). Calendar entries are dated free-text; no audit RPC parses them.
+- `personal/entities.md` — birthday / anniversary fields for the next 2–4 weeks (§3 timing awareness). `entity_audit` flags format violations and dormancy but does not window date fields (see Gaps).
+- `personal/health.md` — health trajectory narrative for pattern projection (§4). Pure prose continuity file; no RPC covers it.
+
+`cog-meta/foresight-nudge.md` is the write target and is overwritten each run; no read needed.
+
+Net: **~7 ops** (4 RPCs + 3 targeted personal-domain reads) before synthesis begins, regardless of domain count or thread volume.
+
+### 3. Original process steps involving memory reads
+
+§1 *Cross-Domain Convergence Scan*:
+
+> "Look for topics, people, or themes appearing in 2+ domains simultaneously. These are convergence points — where effort in one area compounds into another."
+
+§2 *Velocity & Stall Detection*:
+
+> "Scan action-items across all domains. Classify each active item: Accelerating … Cruising … Stalling … Dormant — domain-level silence (0 observations in 4+ weeks)."
+
+§3 *Timing Awareness*:
+
+> "Read calendar and entities for upcoming events in the next 2-4 weeks. Look for timing windows — things that should start NOW to be ready later."
+
+§4 *Pattern Projection*:
+
+> "Read patterns and recent observations. Project forward: 'If this continues for 2 more weeks, what happens?' Scenario candidate detection: if a pattern projection reveals a genuine fork … flag it as a scenario candidate."
+
+§5 *Write One Strategic Nudge*: pure write path to `cog-meta/foresight-nudge.md`. No reads.
+
+Today each bullet drives more reads: §1 convergence needs every domain's hot-memory + observations re-walked to find cross-references; §2 needs each `action-items.md` re-read with date arithmetic; §2 dormancy needs each domain's `observations.md` mtime + entry-date inspected; §3 needs targeted personal reads; §4 needs patterns + recent observations re-fetched. Trivially **15–25 memory-touching ops** beyond orientation on a real install, almost all of them re-fetches.
+
+### 4. Rewritten process steps
+
+- **§1 Cross-Domain Convergence Scan** — the convergence judgment (which topics/people/themes appear in 2+ domains) stays LLM. The *inputs* are now already loaded: `session_brief.domains` carries per-domain hot-memory; `recent_observations` returns 7-day observations tagged by domain. Clustering happens in memory, no additional reads. The "compounds into another" call is judgment, not enumeration.
+- **§2 Velocity & Stall Detection** — `session_brief.action_counts` plus the items in `recent_observations` per domain give the LLM what it needs to classify Accelerating / Cruising / Stalling / Dormant without re-reading per-domain `action-items.md`. The "Dormant — 0 observations in 4+ weeks" check falls out of `housekeeping_scan.changed_recently` (the *inverse* — domains absent from changed_recently for 4+ weeks) plus the domain manifest. Per-item triage (which stall is genuine vs. deferred) stays LLM.
+- **§3 Timing Awareness** — the three personal-domain reads from orientation (`calendar.md`, `entities.md`, `health.md`) cover this directly. No additional RPC; the LLM reasons over the prose for 2–4 week windows. *Gap*: birthday/anniversary date-window scanning would benefit from a `birthday_scan(within_days)` RPC (already logged by `housekeeping`); foresight is the second consumer of that hypothetical RPC.
+- **§4 Pattern Projection** — `session_brief.patterns` carries the patterns file; `recent_observations` carries the 7-day data. Projection ("if this continues for 2 more weeks…") is LLM. Scenario-candidate detection cross-references against `scenario_check.active` to avoid re-proposing a scenario the user already has open — RPC removes the "did I already file this?" guesswork without taking the judgment.
+- **§5 Write One Strategic Nudge** — pure `cog_write` (foresight-nudge.md is on the allow-list per `cog-housekeeping.md` and `cog-memory.md`'s write guard). Overwrite-each-run semantics unchanged. Synthesis, source-citation, "non-obvious" filter, and one-nudge prioritization all stay LLM.
+
+### 5. LLM-judgment-preserved callout
+
+The rewrite eliminates orientation + enumeration scans, *not* judgment. These stay LLM-owned:
+
+- **Cross-domain convergence detection (§1).** Spotting that "Kyle" appears in `work/entities.md` and `projects/observations.md` and that the *connection* matters is pattern recognition over prose. RPCs surface the records; the LLM finds the convergence.
+- **Velocity classification (§2).** "Accelerating vs. cruising vs. stalling" is a calibrated judgment about meaningful momentum, not a count. Action-item updates per week is a signal, not a verdict. The "respect deferrals" anti-pattern is explicitly LLM-side.
+- **Dormancy interpretation (§2).** "Domain silent for 4+ weeks" can be conscious de-prioritization or drift. The RPC says *which* domains are silent; the LLM judges *whether* silence is a nudge candidate.
+- **Timing-window judgment (§3).** "Things that should start NOW to be ready later" requires reading calendar prose, knowing the user's prep cadence, and projecting against current commitments. No RPC carries this.
+- **Pattern projection (§4).** "If this continues for 2 more weeks, what happens?" is forecasting — calibrated extrapolation from the patterns + observations the RPCs serve, not the RPCs' job.
+- **Scenario-candidate filtering (§4).** "Fork + stakes + closing window" is the validity test; routine decisions and hypotheticals without deadlines must be rejected. `scenario_check` tells foresight what's already filed, but never proposes new scenarios on its own.
+- **The nudge itself (§5).** One-nudge-not-a-list prioritization, ≥2-source citation, "non-obvious" filter, cross-domain preference, "be actionable not 'think about X'" — every one of foresight's anti-patterns and rules is enforced by the LLM at synthesis time, not by any RPC.
+- **Read-only discipline.** Foresight's hard rule "NEVER edits memory files except `foresight-nudge.md`; if you spot an error, note it in the signal section and let reflect handle it" is an LLM-side guard. RPCs are read-only by contract here, but the no-write-back rule is policy.
+
+### 6. Round-trip delta
+
+Before: **~33–47 memory-touching ops per run** — orientation (~18–22 on a 4-domain setup) + §1 convergence re-walks + §2 per-domain action-items + dormancy mtime checks + §3 personal reads (already in orientation but typically re-fetched) + §4 patterns + observations re-fetch + §4 scenario-candidate "have I already filed this?" sweep. Scales linearly with domain count and observation volume.
+
+After: **~9–12 ops per run** — orientation (4 RPCs + 3 targeted personal reads) + 1 `cog_write` to `foresight-nudge.md` + occasional cited-file verification when the LLM wants to double-check a specific claim before citing it. Synthesis, classification, projection, and one-nudge prioritization happen in memory over the already-loaded RPC envelopes.
+
+Range: **~33–47 → ~9–12 round-trips**, with the domain-count scaling cliff removed from orientation and §1/§2 simultaneously. The remaining variance is cited-file verification at write time — judgment, not enumeration, and correctly LLM-driven.
+
+---
+
 ## Gaps surfaced
 
 (Populated by the per-skill sections as they uncover needs the
@@ -775,12 +869,15 @@ this is a needs log for a later design pass.)
   RPC layer correctly doesn't cover them. Flagging so a future
   "project-fs" facade isn't accidentally rolled into the memory RPC
   surface.
-- **housekeeping: `birthday_scan(role, within_days)`** — §3 birthday
+- **housekeeping + foresight: `birthday_scan(role, within_days)`** — §3 birthday
   prep wants "entities with `birthday:` / `dob:` falling in the next N
   days, with `interests` field returned for gift-idea synthesis."
   `entity_audit` carries metadata-violation flags but does not parse
   date fields or window them. Currently falls back to a full
-  `domain_summary("personal")` plus LLM date arithmetic.
+  `domain_summary("personal")` plus LLM date arithmetic. Foresight's
+  §3 timing-awareness pass is the second consumer — same date-window
+  shape, different role tag — so the RPC should accept `role` rather
+  than hardcoding housekeeping semantics.
 - **housekeeping: `l0_audit(role, scope?)`** — §8 wants "files missing
   the `<!-- L0: ... -->` header, scoped to changed-recently or full
   tree." No RPC enumerates this; current rewrite uses
