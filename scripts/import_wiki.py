@@ -78,6 +78,11 @@ _SCALAR_KEYS = ("title", "summary", "updated", "entity_type", "status",
 
 def _tolerant_fm(fm_lines):
     """Best-effort frontmatter recovery for blocks that fail strict YAML.
+
+    NOTE: multi-line block scalars (`key: |` / `key: >`) and nested mappings
+    are NOT preserved by this flat line-parser — acceptable for this corpus
+    (flat scalar frontmatter + flow-list related:/tags:). Do not rely on it for
+    richer frontmatter without extending the parser.
     Splits each top-level `key: value` line; for list/flow values, re-parses
     just that line; for scalars, takes the raw remainder verbatim (the writer
     re-quotes on output)."""
@@ -253,6 +258,15 @@ def glacier_meta_log():
 def main():
     if not os.path.isdir(PAGES):
         sys.exit(f"source pages dir not found: {PAGES}")
+    # Safety guard: refuse to run destructive rmtree if DEST is unset, root, or
+    # not an existing directory we can resolve. Protects against a typo'd CLI
+    # arg (e.g. `import_wiki.py SRC /` -> rmtree('/wiki')). The rmtree targets
+    # below are all os.path.join(DEST, ...) — this asserts DEST itself is sane.
+    real_dest = os.path.realpath(DEST)
+    if real_dest in ("/", os.path.realpath(os.path.expanduser("~"))) or real_dest.count(os.sep) < 2:
+        sys.exit(f"refusing to operate on unsafe DEST: {DEST}")
+    if not os.path.isdir(real_dest):
+        sys.exit(f"DEST is not an existing directory: {DEST}")
     # idempotent: clear prior wiki tier + glacier slabs
     if os.path.isdir(WIKI_DEST): shutil.rmtree(WIKI_DEST)
     for p in [os.path.join(GLACIER_DEST, "wiki-conversations"),
