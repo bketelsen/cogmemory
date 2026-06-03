@@ -269,3 +269,67 @@ func equalStrings(a, b []string) bool {
 func pathHasPrefix(s, prefix string) bool {
 	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
 }
+
+// TestLinkIndexComputeRelatedFrontmatter verifies that `related:` frontmatter
+// arrays are indexed as first-class links (the canonical wiki cross-reference
+// mechanism), in addition to body [[wiki-link]] references.
+func TestLinkIndexComputeRelatedFrontmatter(t *testing.T) {
+	ts := newTestServer(t)
+
+	// A wiki page whose cross-references live ONLY in `related:` frontmatter,
+	// not in body [[...]] links.
+	writeFile(t, ts, 1, filepath.ToSlash("wiki/research/honcho/index.md"),
+		"---\n"+
+			"title: Honcho\n"+
+			"entity_type: research\n"+
+			"status: active\n"+
+			"related: [wiki/tools/swarmvault, wiki/research/wiki-redesign/synthesis.md]\n"+
+			"---\n"+
+			"# Honcho\n\nBody with no wiki links.\n")
+	// A second page that references the same target via related: — proves
+	// multiple sources aggregate under one target.
+	writeFile(t, ts, 2, filepath.ToSlash("wiki/tools/omegawiki/index.md"),
+		"---\n"+
+			"title: OmegaWiki\n"+
+			"related: [wiki/tools/swarmvault]\n"+
+			"---\n"+
+			"# OmegaWiki\n")
+
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 10, Method: "link_index_compute",
+		Params: map[string]interface{}{"role": "siona"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("link_index_compute: %v", resp.Error.Message)
+	}
+
+	var result struct {
+		Links []struct {
+			Target  string   `json:"target"`
+			Sources []string `json:"sources"`
+		} `json:"links"`
+	}
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	got := map[string][]string{}
+	for _, e := range result.Links {
+		got[e.Target] = e.Sources
+	}
+
+	// swarmvault is referenced by both pages via related:.
+	if sources, ok := got["wiki/tools/swarmvault"]; !ok {
+		t.Fatalf("missing related: target wiki/tools/swarmvault in %v", got)
+	} else {
+		want := []string{"wiki/research/honcho/index", "wiki/tools/omegawiki/index"}
+		if !equalStrings(sources, want) {
+			t.Errorf("wiki/tools/swarmvault sources = %v, want %v", sources, want)
+		}
+	}
+
+	// The .md suffix on a related: entry must be normalized away like body links.
+	if _, ok := got["wiki/research/wiki-redesign/synthesis"]; !ok {
+		t.Errorf("related: target with .md suffix not normalized; got targets %v", got)
+	}
+}
