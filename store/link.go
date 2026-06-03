@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // LinkEntry is one row of the reverse wiki-link index.
@@ -47,6 +49,25 @@ func normalizeLinkTarget(raw string) string {
 	}
 	target = strings.TrimSuffix(target, ".md")
 	return target
+}
+
+// relatedFrontmatter extracts the `related:` array from a markdown file's YAML
+// frontmatter, if present. These are first-class curated cross-references (the
+// canonical wiki link mechanism) and are indexed as links in addition to body
+// `[[wiki-link]]` references. A missing frontmatter block, missing `related`
+// key, or malformed YAML all yield nil (fail-open).
+func relatedFrontmatter(data string) []string {
+	fm, ok := extractFrontmatter([]byte(data))
+	if !ok {
+		return nil
+	}
+	var parsed struct {
+		Related []string `yaml:"related"`
+	}
+	if yaml.Unmarshal(fm, &parsed) != nil {
+		return nil
+	}
+	return parsed.Related
 }
 
 // readFileShared reads a file under shared lock and returns its contents.
@@ -93,6 +114,20 @@ func (s *MemoryStore) LinkIndex() ([]LinkEntry, error) {
 		matches := wikiLinkRE.FindAllStringSubmatch(data, -1)
 		for _, m := range matches {
 			target := normalizeLinkTarget(m[1])
+			if target == "" || target == source {
+				continue
+			}
+			set, ok := idx[target]
+			if !ok {
+				set = map[string]struct{}{}
+				idx[target] = set
+			}
+			set[source] = struct{}{}
+		}
+		// Also index `related:` frontmatter entries as first-class links —
+		// the canonical curated cross-reference mechanism for the wiki tier.
+		for _, raw := range relatedFrontmatter(data) {
+			target := normalizeLinkTarget(raw)
 			if target == "" || target == source {
 				continue
 			}
