@@ -632,6 +632,38 @@ func (srv *Server) handleGlacierIndexCompute(req Request) Response {
 	})
 }
 
+// --- wiki_index_compute ---
+
+type wikiIndexParams struct {
+	baseParams
+}
+
+func (srv *Server) handleWikiIndexCompute(req Request) Response {
+	var p wikiIndexParams
+	if req.Params != nil {
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return errorResponse(req.ID, CodeInvalidParams, "wiki_index_compute: invalid params: "+err.Error())
+		}
+	}
+	if p.Role == "" {
+		return errorResponse(req.ID, CodeInvalidParams, "wiki_index_compute: role required")
+	}
+	all, err := srv.store.WikiIndex()
+	if err != nil {
+		return errorResponse(req.ID, CodeStoreError, "wiki_index_compute: "+err.Error())
+	}
+	filtered := make([]store.WikiEntry, 0, len(all))
+	for _, e := range all {
+		if srv.rbac.Check(p.Role, e.Path, "read") {
+			filtered = append(filtered, e)
+		}
+	}
+	return okResponse(req.ID, map[string]interface{}{
+		"entries": filtered,
+		"count":   len(filtered),
+	})
+}
+
 // --- domain_summary ---
 
 type domainSummaryParams struct {
