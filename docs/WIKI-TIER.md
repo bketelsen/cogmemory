@@ -175,6 +175,14 @@ Three mechanisms ship in v1; the fourth (semantic) is explicitly deferred.
 3. **Link graph** — `related:` arrays + body `[[wiki/...]]` links, resolved by
    extending the existing `link_index_compute` / `link_audit` to span the `wiki/`
    tree.
+
+   **Implementation note (corrected 2026-06-03, post-smoke):** the existing
+   `store/link.go` extracts links *only* from body `[[...]]` text — it does **not**
+   read the `related:` frontmatter array. Since `related:` is the canonical curated
+   cross-reference mechanism (Brian's decision), `link.go` must be extended to parse
+   `related:` arrays as link sources. This is real Phase 1c work, not a no-op as an
+   earlier draft assumed. `cog_search` and the tree-walk *do* already span `wiki/`
+   with no change (verified).
 4. **Semantic search — DEFERRED to Phase 2.** See "Deferred" below.
 
 ---
@@ -315,7 +323,7 @@ of this build.
 |-------|------|-----------|
 | **1a** | `wiki/` tier + `wiki.yml` taxonomy + frontmatter schema + facet law | small |
 | **1b** | `wiki_index_compute` RPC (clone of `glacier_index_compute`) + render `wiki/index.md` | ~1 day |
-| **1c** | extend `cog_search` / `link_index_compute` / `link_audit` to span `wiki/` | ~half day |
+| **1c** | teach `link.go` to index `related:` frontmatter arrays (it currently reads only body `[[...]]`); verify `cog_search` spans `wiki/` (already does) | ~half day |
 | **1d** | curated import (~75 pages) + normalization + fix 6 ghost links | ~half day |
 | **2** | `wiki_search` (semantic embeddings) — **only if** regex retrieval proves insufficient | real cost; deferred |
 | **2** | `wiki_audit` (entity_audit-style sweep) | small; deferred |
