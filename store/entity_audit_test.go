@@ -246,3 +246,58 @@ func TestEntityAuditMultipleFilesSorted(t *testing.T) {
 		t.Fatalf("wrong glacier set: %+v", res.GlacierCandidates)
 	}
 }
+
+// total_entries/total_lines feed the entity compression ratio (target ≤3.0
+// lines per entry) consumed by the evolve skill's scorecard.
+func TestEntityAuditTotals(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "mem")
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Entry 1: 3 meaningful lines. Entry 2: 5 meaningful lines (over-cap).
+	// Blanks and comments don't count.
+	body := `# Work — Entities
+
+<!-- registry comment -->
+
+### Microsoft (employer)
+Role: Principal Engineering Manager
+status: active | last: 2026-05-27
+
+### Verbose Vendor (vendor)
+Fact one
+Fact two
+Fact three
+status: active | last: 2026-05-01
+`
+	writeEntities(t, root, "work/entities.md", body)
+	res, err := s.EntityAudit(
+		[]ActionTarget{{Domain: "work", Path: "work/entities.md"}},
+		time.Date(2026, 5, 28, 0, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TotalEntries != 2 {
+		t.Errorf("TotalEntries = %d, want 2", res.TotalEntries)
+	}
+	if res.TotalLines != 8 {
+		t.Errorf("TotalLines = %d, want 8 (3 + 5 meaningful lines)", res.TotalLines)
+	}
+}
+
+func TestEntityAuditTotalsEmptyStore(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "mem")
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := s.EntityAudit(nil, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TotalEntries != 0 || res.TotalLines != 0 {
+		t.Errorf("empty store totals = %d/%d, want 0/0", res.TotalEntries, res.TotalLines)
+	}
+}
