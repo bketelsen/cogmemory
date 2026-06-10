@@ -139,6 +139,10 @@ type EntityAuditResult struct {
 	GlacierCandidates  []EntityGlacierCandidate  `json:"glacier_candidates"`
 	MissingMetadata    []EntityMissingMetadata   `json:"missing_metadata"`
 	TemporalViolations []EntityTemporalViolation `json:"temporal_violations"`
+	// TotalEntries/TotalLines feed the entity compression ratio
+	// (lines per entry, target ≤3.0) consumed by evolve's scorecard.
+	TotalEntries int `json:"total_entries"`
+	TotalLines   int `json:"total_lines"`
 }
 
 // MemoryStore provides file-based memory operations rooted at a directory.
@@ -1342,6 +1346,9 @@ func auditOneEntitiesFile(res *EntityAuditResult, domainID, path, body string, n
 				}
 			}
 		}
+
+		res.TotalEntries++
+		res.TotalLines += count
 
 		if count > 3 {
 			res.FormatViolations = append(res.FormatViolations, EntityFormatViolation{
