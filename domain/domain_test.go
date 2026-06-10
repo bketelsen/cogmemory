@@ -1,6 +1,7 @@
 package domain_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -234,5 +235,52 @@ func TestControllerEntitiesResolves(t *testing.T) {
 	}
 	if targets[0].Domain != "personal" || targets[0].Path != "personal/entities.md" {
 		t.Fatalf("Entities[0] = %+v", targets[0])
+	}
+}
+
+const nestedProjectsManifest = `version: 1
+domains:
+  - id: projects
+    path: projects
+    files: [hot-memory, observations]
+    subdomains:
+      - id: chapterhouse
+        path: projects/chapterhouse
+        files: [hot-memory, observations]
+`
+
+func TestControllerValidateWriteFlagsIDAsPath(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, nestedProjectsManifest)
+	c, _ := domain.New(dir)
+
+	// Domain id used as a root-level path → hard hygiene error that names
+	// the configured path so the client can self-correct.
+	err := c.ValidateWrite("chapterhouse/INDEX.md")
+	if err == nil {
+		t.Fatal("ValidateWrite(id-as-path): want error, got nil")
+	}
+	if !errors.Is(err, domain.ErrIDAsPath) {
+		t.Fatalf("error is not ErrIDAsPath: %v", err)
+	}
+	if !strings.Contains(err.Error(), "projects/chapterhouse") {
+		t.Fatalf("error doesn't name configured path: %v", err)
+	}
+
+	// Same domain addressed by its configured path → no error.
+	if err := c.ValidateWrite("projects/chapterhouse/observations.md"); err != nil {
+		t.Fatalf("ValidateWrite(configured path): %v", err)
+	}
+}
+
+func TestControllerValidateWriteAllowsIDPrefixedPath(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, goodManifest)
+	c, _ := domain.New(dir)
+
+	// goodManifest: id "work" lives at "work/microsoft". A write under the
+	// shared "work/" parent dir is not the id-as-path mistake.
+	if err := c.ValidateWrite("work/notes.md"); err != nil {
+		t.Fatalf("ValidateWrite(id-prefixed parent dir): %v", err)
 	}
 }

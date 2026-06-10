@@ -270,3 +270,31 @@ domains:
 		t.Errorf("expected hot-reloaded label, got %q", r.Label)
 	}
 }
+
+// The envelope must expose the domain's configured filesystem path so
+// clients writing INDEX.md (housekeeping §9) never derive it from the id.
+func TestDomainSummaryIncludesPath(t *testing.T) {
+	ts := newTestServer(t)
+
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 1, Method: "domain_summary",
+		Params: map[string]interface{}{"role": "siona", "domain": "dakota"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("domain_summary: %v", resp.Error.Message)
+	}
+
+	var result struct {
+		Domain string `json:"domain"`
+		Path   string `json:"path"`
+	}
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result.Domain != "dakota" {
+		t.Errorf("domain = %q, want %q", result.Domain, "dakota")
+	}
+	if result.Path != "projects/dakota" {
+		t.Errorf("path = %q, want %q", result.Path, "projects/dakota")
+	}
+}

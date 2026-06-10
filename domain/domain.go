@@ -311,14 +311,21 @@ func (c *Controller) DomainForPath(relPath string) (string, string, bool) {
 	return bestID, bestFile, true
 }
 
+// ErrIDAsPath marks writes whose first path segment is a domain *id* whose
+// configured path lives elsewhere — the "id-as-path" client mistake that
+// creates stray sibling folders at the memory root.
+var ErrIDAsPath = fmt.Errorf("domain id used as path")
+
 // ValidateWrite returns nil when the write is well-formed for its declaring
 // domain, or a descriptive error when the file basename isn't in the
-// domain's declared files list. Writes that don't fall under any declared
-// domain return nil (out-of-scope, not malformed).
+// domain's declared files list. Writes whose first segment is a domain id
+// with a different configured path return an error wrapping ErrIDAsPath.
+// Other writes that don't fall under any declared domain return nil
+// (out-of-scope, not malformed).
 func (c *Controller) ValidateWrite(relPath string) error {
 	id, file, ok := c.DomainForPath(relPath)
 	if !ok {
-		return nil
+		return c.checkIDAsPath(relPath)
 	}
 	d, err := c.Get(id)
 	if err != nil {
@@ -329,6 +336,25 @@ func (c *Controller) ValidateWrite(relPath string) error {
 	}
 	return fmt.Errorf("write to %q is under domain %q but %q is not in its declared files %v",
 		relPath, id, file, d.Files)
+}
+
+// checkIDAsPath flags paths whose first segment names a domain id whose
+// configured path neither equals nor starts with that segment (a path under
+// a shared parent dir of the same name is not the mistake).
+func (c *Controller) checkIDAsPath(relPath string) error {
+	seg, _, _ := strings.Cut(filepath.ToSlash(filepath.Clean(relPath)), "/")
+	if seg == "" || seg == "." {
+		return nil
+	}
+	d, err := c.Get(seg)
+	if err != nil {
+		return nil
+	}
+	if d.Path == seg || strings.HasPrefix(d.Path, seg+"/") {
+		return nil
+	}
+	return fmt.Errorf("%w: write to %q uses domain id %q as its path; domain %q lives at %q",
+		ErrIDAsPath, relPath, seg, d.ID, d.Path)
 }
 
 // --- helpers ---

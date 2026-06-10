@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"regexp"
@@ -70,7 +71,9 @@ func (srv *Server) handleWrite(req Request) Response {
 	if !srv.rbac.Check(p.Role, p.Path, "write") {
 		return errorResponse(req.ID, CodeRBACDenied, fmt.Sprintf("write denied for role %q on %q", p.Role, p.Path))
 	}
-	srv.warnIfMalformed("write", p.Path)
+	if err := srv.checkWritePath("write", p.Path); err != nil {
+		return errorResponse(req.ID, CodeInvalidParams, "write: "+err.Error())
+	}
 	if err := srv.store.Write(p.Path, p.Content); err != nil {
 		return errorResponse(req.ID, CodeStoreError, "write: "+err.Error())
 	}
@@ -99,7 +102,9 @@ func (srv *Server) handleAppend(req Request) Response {
 	if !srv.rbac.Check(p.Role, p.Path, "write") {
 		return errorResponse(req.ID, CodeRBACDenied, fmt.Sprintf("append denied for role %q on %q", p.Role, p.Path))
 	}
-	srv.warnIfMalformed("append", p.Path)
+	if err := srv.checkWritePath("append", p.Path); err != nil {
+		return errorResponse(req.ID, CodeInvalidParams, "append: "+err.Error())
+	}
 	if err := srv.store.AppendSection(p.Path, p.Section, p.Text); err != nil {
 		return errorResponse(req.ID, CodeStoreError, "append: "+err.Error())
 	}
@@ -676,6 +681,7 @@ type domainSummaryParams struct {
 // Field shape mirrors RPC-CONSOLIDATION.md §5.
 type DomainSummaryResult struct {
 	Domain                    string                   `json:"domain"`
+	Path                      string                   `json:"path"`
 	Label                     string                   `json:"label"`
 	HotMemory                 string                   `json:"hot_memory"`
 	OpenActionCount           int                      `json:"open_action_count"`
@@ -720,6 +726,7 @@ func (srv *Server) handleDomainSummary(req Request) Response {
 
 	result := DomainSummaryResult{
 		Domain:             d.ID,
+		Path:               d.Path,
 		Label:              d.Label,
 		RecentObservations: []store.ObservationEntry{},
 		FilesPresent:       []string{},
@@ -951,14 +958,23 @@ func (srv *Server) handleGit(req Request) Response {
 	})
 }
 
-// warnIfMalformed emits a log warning when a write/append targets a path that
-// lives under a declared domain but isn't in that domain's `files` list.
-// Pure hygiene signal — never blocks the operation.
-func (srv *Server) warnIfMalformed(op, path string) {
+// checkWritePath gates write/append paths against the domain manifest.
+// Id-as-path mistakes (first segment is a domain id whose configured path
+// lives elsewhere, e.g. "chapterhouse/INDEX.md" for projects/chapterhouse)
+// are returned as errors so the caller can reject the operation with a
+// corrective message. Everything else ValidateWrite flags (undeclared file
+// under a valid domain path) stays a log-only hygiene warning.
+func (srv *Server) checkWritePath(op, path string) error {
 	if srv.controller == nil {
-		return
+		return nil
 	}
-	if err := srv.controller.ValidateWrite(path); err != nil {
-		log.Printf("cogmemory: %s warning: %v", op, err)
+	err := srv.controller.ValidateWrite(path)
+	if err == nil {
+		return nil
 	}
+	if errors.Is(err, domain.ErrIDAsPath) {
+		return err
+	}
+	log.Printf("cogmemory: %s warning: %v", op, err)
+	return nil
 }

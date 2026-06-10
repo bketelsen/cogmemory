@@ -16,7 +16,7 @@ import (
 //	{
 //	  "hot_memory":  "<content of hot-memory.md>",
 //	  "patterns":    "<content of cog-meta/patterns.md>",
-//	  "domains":     [{id,label,triggers}, ...],          // RBAC-filtered
+//	  "domains":     [{id,path,label,triggers}, ...],     // RBAC-filtered
 //	  "action_counts": {
 //	    "<domain-id>":         <open-count>,              // RBAC-filtered
 //	    "_pri_high_anywhere": <bool>
@@ -35,6 +35,7 @@ type sessionBriefParams struct {
 
 type sessionBriefDomain struct {
 	ID       string   `json:"id"`
+	Path     string   `json:"path"`
 	Label    string   `json:"label,omitempty"`
 	Triggers []string `json:"triggers,omitempty"`
 }
@@ -100,7 +101,7 @@ func (srv *Server) handleSessionBrief(req Request) Response {
 func collectDomain(d domain.Domain, role string, srv *Server, out *[]sessionBriefDomain) {
 	if srv.rbac.Check(role, d.Path, "read") {
 		*out = append(*out, sessionBriefDomain{
-			ID: d.ID, Label: d.Label, Triggers: d.Triggers,
+			ID: d.ID, Path: d.Path, Label: d.Label, Triggers: d.Triggers,
 		})
 	}
 	for _, sd := range d.Subdomains {
