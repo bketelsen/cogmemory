@@ -515,6 +515,15 @@ calls and write paths are out of scope per guardrails.
   so the per-file L0 extraction happens from the `domain_summary`
   envelope rather than N individual reads.
 
+  **Write to the domain `path`, never the `id`.** Both
+  `session_brief().domains[]` and the `domain_summary` envelope carry
+  a `path` field (e.g. id `chapterhouse` → path
+  `projects/chapterhouse`); the INDEX.md target is
+  `{path}/INDEX.md`, and every row in the table is
+  `{path}/{file}.md`. Constructing `{id}/INDEX.md` creates a stray
+  sibling folder at the memory root — the daemon now rejects such
+  writes with `invalid params` naming the correct path.
+
 ### 5. LLM-judgment-preserved callout
 
 The rewrite keeps the model on the hook for everything that is not a

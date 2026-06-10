@@ -155,6 +155,47 @@ func TestSessionBriefRBACFiltersDomainsAndCounts(t *testing.T) {
 	}
 }
 
+// Each domain entry must expose its configured filesystem path so clients
+// never have to guess it from the id (id "dakota" lives at projects/dakota).
+func TestSessionBriefDomainsIncludePath(t *testing.T) {
+	ts := newTestServer(t)
+
+	call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 1, Method: "write",
+		Params: map[string]interface{}{
+			"role": "siona", "path": "hot-memory.md", "content": "hot\n",
+		},
+	})
+
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 2, Method: "session_brief",
+		Params: map[string]interface{}{"role": "siona"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("session_brief: %v", resp.Error.Message)
+	}
+
+	var result struct {
+		Domains []struct {
+			ID   string `json:"id"`
+			Path string `json:"path"`
+		} `json:"domains"`
+	}
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	paths := map[string]string{}
+	for _, d := range result.Domains {
+		paths[d.ID] = d.Path
+	}
+	if paths["dakota"] != "projects/dakota" {
+		t.Errorf("domains[dakota].path = %q, want %q", paths["dakota"], "projects/dakota")
+	}
+	if paths["work"] != "work/microsoft" {
+		t.Errorf("domains[work].path = %q, want %q", paths["work"], "work/microsoft")
+	}
+}
+
 func TestSessionBriefMissingRoleErrors(t *testing.T) {
 	ts := newTestServer(t)
 	resp := call(t, ts.socketPath, rpcRequest{
