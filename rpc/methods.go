@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"regexp"
 	"strings"
 	"time"
 
@@ -351,8 +350,10 @@ func (srv *Server) handleOpenActions(req Request) Response {
 
 type recentObservationsParams struct {
 	baseParams
-	// Since is an inclusive YYYY-MM-DD lower bound. Empty defaults to
-	// "today minus 7 days" (reflect + foresight's standard window).
+	// Since is an inclusive lower bound: YYYY-MM-DD, RFC3339, or a
+	// duration like "7d"/"168h" (same forms as cluster_check and
+	// domain_summary, via resolveSince). Empty defaults to "today minus
+	// 7 days" (reflect + foresight's standard window).
 	Since string `json:"since,omitempty"`
 	// ByTag, when set, restricts entries to those whose tag list contains
 	// the given tag (case-sensitive). Aggregates reflect the filtered set.
@@ -360,8 +361,6 @@ type recentObservationsParams struct {
 	// ByDomain, when set, restricts the scan to a single canonical domain id.
 	ByDomain string `json:"by_domain,omitempty"`
 }
-
-var dateOnlyRE = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 
 func (srv *Server) handleRecentObservations(req Request) Response {
 	var p recentObservationsParams
@@ -373,13 +372,9 @@ func (srv *Server) handleRecentObservations(req Request) Response {
 	if p.Role == "" {
 		return errorResponse(req.ID, CodeInvalidParams, "recent_observations: role required")
 	}
-	if p.Since != "" && !dateOnlyRE.MatchString(p.Since) {
-		return errorResponse(req.ID, CodeInvalidParams,
-			fmt.Sprintf("recent_observations: since %q must be YYYY-MM-DD", p.Since))
-	}
-	since := p.Since
-	if since == "" {
-		since = time.Now().UTC().AddDate(0, 0, -7).Format("2006-01-02")
+	_, since, err := resolveSince(p.Since)
+	if err != nil {
+		return errorResponse(req.ID, CodeInvalidParams, "recent_observations: "+err.Error())
 	}
 
 	var targets []store.ObsTarget

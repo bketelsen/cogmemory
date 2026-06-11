@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -1301,5 +1302,33 @@ func TestScenarioCheckRBACFiltersUnreadable(t *testing.T) {
 	}
 	if len(got.Scenarios) != 0 {
 		t.Fatalf("project-reader should see 0 scenarios, got %d: %#v", len(got.Scenarios), got.Scenarios)
+	}
+}
+
+// since accepts the same duration forms as cluster_check/domain_summary
+// (resolveSince) — skill playbooks pass "7d"/"30d"/"90d" everywhere.
+func TestRecentObservationsDurationSince(t *testing.T) {
+	ts := newTestServer(t)
+	seedObs(t, ts, "personal/observations.md", strings.Join([]string{
+		"- 2026-05-29 [health]: slept 8h",
+		"",
+	}, "\n"))
+
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 1, Method: "recent_observations",
+		Params: map[string]interface{}{"role": "siona", "since": "365d"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("recent_observations since=365d: %v", resp.Error.Message)
+	}
+	var result recentObsResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`).MatchString(result.Since) {
+		t.Fatalf("since should resolve to a date, got %q", result.Since)
+	}
+	if len(result.Entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(result.Entries))
 	}
 }
