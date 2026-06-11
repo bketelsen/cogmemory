@@ -1,5 +1,13 @@
 # Cog-Prime Skill Rewrites — Translation Table
 
+> **HISTORICAL.** This document recorded the original file-ops→RPC translation
+> design and is no longer maintained; some envelope fields described below
+> have drifted from the code. The living integration contract is
+> [`docs/llm/`](./llm/): [RPC.md](./llm/RPC.md) (envelopes),
+> [CONVENTIONS.md](./llm/CONVENTIONS.md) (session conventions),
+> [INTEGRATION.md](./llm/INTEGRATION.md) (hosting guide), and
+> [skills/](./llm/skills/) (canonical playbooks).
+
 Round-trip-by-round-trip translation of the cog-prime skill bodies
 (https://github.com/marciopuga/cog/blob/main/.claude/commands/) into the
 RPC vocabulary proposed in [RPC-CONSOLIDATION.md](./RPC-CONSOLIDATION.md).
