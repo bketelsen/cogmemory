@@ -1,4 +1,28 @@
-# cogmemory
+# cogmemory — ARCHIVED 2026-06-12
+
+> **This repository is archived and no longer maintained.**
+>
+> `cogmemory` has been folded into [ytsejam](https://github.com/bketelsen/ytsejam)
+> as an in-process TypeScript module. The standalone Go daemon is retired.
+>
+> - **New home:** `ytsejam/server/src/memory/` (see `ytsejam/docs/memory/FORMAT.md`
+>   for the on-disk file format spec, which is unchanged).
+> - **Final tag:** `v1.0.0-archived` — the last functional binary.
+> - **Why:** every justification for a separate daemon (multi-harness sharing,
+>   independent restart, non-TS access) was dead or library-shaped by mid-2026,
+>   and installing two services for a single-user single-process consumer was
+>   the wrong shape. See `ytsejam/docs/plans/2026-06-12-fold-cogmemory.md` for
+>   the migration plan.
+> - **Migrating an existing install:** run
+>   `ytsejam/deploy/migrate-to-folded.sh` — it stops + removes the daemon
+>   units, sockets, and config, and moves the on-disk store from
+>   `~/.chapterhouse/memory` to `~/.ytsejam/data/memory`. Idempotent.
+>
+> The on-disk file format (markdown + L0 + `domains.yml` + glacier YAML
+> frontmatter) is the portability surface. A future non-TS reader writes
+> against the format spec, not against this daemon.
+
+---
 
 Cog memory service is a concurrent-safe JSON-RPC 2.0 daemon for agent memory files.
 It listens on a Unix Domain Socket and centralizes file operations so multiple
