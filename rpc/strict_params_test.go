@@ -62,7 +62,11 @@ func TestStrictParamsWrite(t *testing.T) {
 }
 
 // recent_observations — complex aggregate. This is the method behind the
-// original bug report (domain:→by_domain:, days:→since:).
+// original bug report (days:→since:). NOTE: as of the rename PR (#22)
+// `domain` is now the CANONICAL scope param (with `by_domain` kept as a
+// deprecated alias), so `domain` is no longer a "wrong name" — it filters.
+// The strict-decode contract is therefore exercised here with `days` (still
+// not a field; the window param is `since`) and a clearly-bogus field.
 func TestStrictParamsRecentObservations(t *testing.T) {
 	ts := newTestServer(t)
 	seedObs(t, ts, "personal/observations.md", "- 2026-05-29 [x]: p\n")
@@ -71,12 +75,15 @@ func TestStrictParamsRecentObservations(t *testing.T) {
 	assertUnknownFieldRejected(t, ts, 1, "recent_observations", "days", map[string]interface{}{
 		"role": "siona", "days": 14,
 	})
-	// `domain` is not a field (the scope param is `by_domain`) — rejected.
-	assertUnknownFieldRejected(t, ts, 2, "recent_observations", "domain", map[string]interface{}{
-		"role": "siona", "domain": "personal",
+	// A clearly-unknown field is rejected. (`domain` is now canonical post-#22,
+	// so it can no longer stand in as the "wrong name" example here.)
+	assertUnknownFieldRejected(t, ts, 2, "recent_observations", "bogus_field", map[string]interface{}{
+		"role": "siona", "bogus_field": "x",
 	})
 
-	// The correct field names still work end-to-end.
+	// The correct field names still work end-to-end (both the canonical
+	// `domain` and the deprecated `by_domain` alias scope identically; this
+	// asserts the alias path, which remains supported until 2026-07-12).
 	resp := call(t, ts.socketPath, rpcRequest{
 		JSONRPC: "2.0", ID: 3, Method: "recent_observations",
 		Params: map[string]interface{}{"role": "siona", "since": "2026-05-01", "by_domain": "personal"},
@@ -169,16 +176,19 @@ func TestStrictParamsDomainsList(t *testing.T) {
 // TestRecentObservationsWrongParamNamesAreRejected is the post-strict-decode
 // successor to PR #21's TestRecentObservationsWrongParamNamesAreSilentlyIgnored.
 //
-// PR #21 (test-only) *characterized* the trap: the scope param is `by_domain`
-// and the window param is `since`, but sibling RPCs name their scope `domain`,
-// so callers reach for `domain:`/`days:` out of habit. Under a plain
-// json.Unmarshal those unknown keys were silently dropped — the call quietly
-// degraded to "all domains, default window". That silent drop was the bug
-// behind the 2026-06-11 "domain filter is a no-op" report.
+// PR #21 (test-only) *characterized* the trap: callers reached for `domain:`
+// and `days:` out of habit, but at the time the scope param was `by_domain`
+// and the window param was `since`. Under a plain json.Unmarshal those
+// unknown keys were silently dropped — the call quietly degraded to "all
+// domains, default window". That silent drop was the bug behind the
+// 2026-06-11 "domain filter is a no-op" report.
 //
-// This PR makes every handler decode strictly, so those same wrong names now
-// fail loudly with -32602 (the message naming the offending field) instead of
-// degrading. This test pins the *new* contract.
+// Two things changed since: PR #23 makes every handler decode strictly, so
+// unknown names now fail loudly with -32602 (the message naming the offending
+// field); and PR #22 promoted `domain` to the canonical scope param (keeping
+// `by_domain` as a deprecated alias). So `domain` is no longer a wrong name —
+// this test exercises the strict path with names that are still genuinely
+// unknown (`days`, `frob`). It pins the *new* contract.
 //
 // SEQUENCING: if PR #21 merges before this PR, its assertion that the wrong
 // names are silently ignored will start FAILING on main (that's the intended
@@ -188,17 +198,21 @@ func TestStrictParamsDomainsList(t *testing.T) {
 func TestRecentObservationsWrongParamNamesAreRejected(t *testing.T) {
 	ts := newTestServer(t)
 	// Two domains both inside the default 7-day window, mirroring PR #21's
-	// fixture so the contrast is exact: there the dropped `domain`/`days`
-	// returned both; here the request never runs because decode fails first.
+	// fixture so the contrast is exact: there the dropped wrong names returned
+	// both; here the request never runs because decode fails first.
 	today := time.Now().UTC().Format("2006-01-02")
 	seedObs(t, ts, "personal/observations.md", fmt.Sprintf("- %s [x]: p\n", today))
 	seedObs(t, ts, "work/microsoft/observations.md", fmt.Sprintf("- %s [x]: w\n", today))
 
-	// The exact names from the bug report. Each is an unknown field and is now
+	// Two muscle-memory wrong names. `days` is the classic typo for the
+	// window param `since`; `frob` stands in for any field that simply does
+	// not exist. NOTE: post-#22 `domain` is now the CANONICAL scope param, so
+	// it is NO LONGER a wrong name (it filters) — hence it cannot appear here
+	// as a rejected field. Each name below is genuinely unknown and is now
 	// rejected with -32602 — not silently dropped.
 	resp := call(t, ts.socketPath, rpcRequest{
 		JSONRPC: "2.0", ID: 1, Method: "recent_observations",
-		Params: map[string]interface{}{"role": "siona", "days": 14, "domain": "personal"},
+		Params: map[string]interface{}{"role": "siona", "days": 14, "frob": "x"},
 	})
 	if resp.Error == nil {
 		t.Fatalf("wrong param names accepted, want -32602; result=%s", string(resp.Result))
@@ -210,8 +224,8 @@ func TestRecentObservationsWrongParamNamesAreRejected(t *testing.T) {
 	// order on the wire isn't deterministic, so accept either offender as
 	// long as one of the two bad names is surfaced.
 	if !strings.Contains(resp.Error.Message, `unknown field "days"`) &&
-		!strings.Contains(resp.Error.Message, `unknown field "domain"`) {
-		t.Fatalf("error should name a bad field (days/domain), got: %s", resp.Error.Message)
+		!strings.Contains(resp.Error.Message, `unknown field "frob"`) {
+		t.Fatalf("error should name a bad field (days/frob), got: %s", resp.Error.Message)
 	}
 
 	// And the correct names still scope the scan (the contract the caller

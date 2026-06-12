@@ -209,7 +209,9 @@ Plus every skill reads `domains.yml` to know what exists, and several read `cog-
 
 **Round-trips today**: N reads + client-side date parse + cluster.
 
-**Proposed RPC**: `recent_observations(role, since?, by_tag?, by_domain?)`
+**Proposed RPC**: `recent_observations(role, since?, by_tag?, domain?)`
+
+> Scope param naming: `domain` is canonical (consistent with open_actions, cluster_check, domain_summary, entity_audit, l0index). `by_domain` was the original name and is retained as a **DEPRECATED alias until 2026-07-12** — its lone divergence from the sibling RPCs was the muscle-memory trap behind PR #21. Note `by_domain` also names an *output* aggregate map below; that output field is unaffected.
 
 **Result envelope**:
 ```json

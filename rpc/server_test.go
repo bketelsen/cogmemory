@@ -1061,7 +1061,38 @@ func TestRecentObservationsByTagFilter(t *testing.T) {
 	}
 }
 
-func TestRecentObservationsByDomainFilter(t *testing.T) {
+// TestRecentObservationsDomainParamWorks pins the canonical scope param.
+// As of 2026-06-12 `domain` is the canonical name (matching open_actions,
+// cluster_check, domain_summary, entity_audit, l0index); `by_domain` is a
+// deprecated alias kept until 2026-07-12.
+func TestRecentObservationsDomainParamWorks(t *testing.T) {
+	ts := newTestServer(t)
+	seedObs(t, ts, "personal/observations.md", "- 2026-05-29 [x]: p\n")
+	seedObs(t, ts, "work/microsoft/observations.md", "- 2026-05-29 [x]: w\n")
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 1, Method: "recent_observations",
+		Params: map[string]interface{}{"role": "siona", "since": "2026-05-01", "domain": "personal"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("rpc: %v", resp.Error.Message)
+	}
+	var result recentObsResult
+	json.Unmarshal(resp.Result, &result)
+	if len(result.Entries) != 1 || result.Entries[0].Domain != "personal" {
+		t.Fatalf("domain did not isolate: %+v", result.Entries)
+	}
+	if result.ByDomain["personal"] != 1 || len(result.ByDomain) != 1 {
+		t.Fatalf("by_domain aggregate should contain only personal: %+v", result.ByDomain)
+	}
+}
+
+// TestRecentObservationsByDomainAliasStillWorks proves the DEPRECATED
+// `by_domain` alias scopes identically to the canonical `domain` param while
+// it remains supported (removal target 2026-07-12). The handler also logs a
+// deprecation warning on this path; logger output is not asserted here
+// (capturing the daemon's log.Printf across the socket boundary is flaky), so
+// the assertion is behavioral equivalence to TestRecentObservationsDomainParamWorks.
+func TestRecentObservationsByDomainAliasStillWorks(t *testing.T) {
 	ts := newTestServer(t)
 	seedObs(t, ts, "personal/observations.md", "- 2026-05-29 [x]: p\n")
 	seedObs(t, ts, "work/microsoft/observations.md", "- 2026-05-29 [x]: w\n")
@@ -1075,18 +1106,102 @@ func TestRecentObservationsByDomainFilter(t *testing.T) {
 	var result recentObsResult
 	json.Unmarshal(resp.Result, &result)
 	if len(result.Entries) != 1 || result.Entries[0].Domain != "personal" {
-		t.Fatalf("by_domain did not isolate: %+v", result.Entries)
+		t.Fatalf("by_domain alias did not isolate: %+v", result.Entries)
+	}
+}
+
+// TestRecentObservationsBothDomainAndByDomainSameValueAllowed: passing both
+// the canonical and the deprecated alias with the SAME value is not a hostile
+// case — either alone would have worked — so it is accepted and scopes normally.
+func TestRecentObservationsBothDomainAndByDomainSameValueAllowed(t *testing.T) {
+	ts := newTestServer(t)
+	seedObs(t, ts, "personal/observations.md", "- 2026-05-29 [x]: p\n")
+	seedObs(t, ts, "work/microsoft/observations.md", "- 2026-05-29 [x]: w\n")
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 1, Method: "recent_observations",
+		Params: map[string]interface{}{"role": "siona", "since": "2026-05-01", "domain": "personal", "by_domain": "personal"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("same-value domain+by_domain should be accepted, got: %v", resp.Error.Message)
+	}
+	var result recentObsResult
+	json.Unmarshal(resp.Result, &result)
+	if len(result.Entries) != 1 || result.Entries[0].Domain != "personal" {
+		t.Fatalf("same-value domain+by_domain did not isolate: %+v", result.Entries)
+	}
+}
+
+// TestRecentObservationsBothDomainAndByDomainDifferRejected: supplying the
+// canonical `domain` and the deprecated `by_domain` with DIFFERENT values is
+// ambiguous and rejected with CodeInvalidParams (-32602).
+func TestRecentObservationsBothDomainAndByDomainDifferRejected(t *testing.T) {
+	ts := newTestServer(t)
+	seedObs(t, ts, "personal/observations.md", "- 2026-05-29 [x]: p\n")
+	seedObs(t, ts, "work/microsoft/observations.md", "- 2026-05-29 [x]: w\n")
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 1, Method: "recent_observations",
+		Params: map[string]interface{}{"role": "siona", "since": "2026-05-01", "domain": "personal", "by_domain": "work"},
+	})
+	if resp.Error == nil || resp.Error.Code != rpc.CodeInvalidParams {
+		t.Fatalf("want -32602 for conflicting domain/by_domain, got %+v", resp.Error)
 	}
 }
 
 func TestRecentObservationsByDomainUnknownErrors(t *testing.T) {
 	ts := newTestServer(t)
+	// Canonical param: unknown domain id → error.
 	resp := call(t, ts.socketPath, rpcRequest{
 		JSONRPC: "2.0", ID: 1, Method: "recent_observations",
+		Params: map[string]interface{}{"role": "siona", "domain": "ghost"},
+	})
+	if resp.Error == nil {
+		t.Fatal("want error for unknown domain id (domain)")
+	}
+	// Deprecated alias: unknown domain id → error too.
+	resp = call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 2, Method: "recent_observations",
 		Params: map[string]interface{}{"role": "siona", "by_domain": "ghost"},
 	})
 	if resp.Error == nil {
-		t.Fatal("want error for unknown domain id")
+		t.Fatal("want error for unknown domain id (by_domain alias)")
+	}
+}
+
+// TestRecentObservationsWrongParamNamesAreSilentlyIgnored is the descendant of
+// the PR #21 regression guard. Rename history:
+//   - Originally (PR #21) this test pinned that `domain:` was an UNKNOWN field,
+//     silently dropped by a plain json.Unmarshal, so it did NOT scope and every
+//     domain came back — the "domain filter is a no-op" symptom.
+//   - As of this change (2026-06-12) `domain` is the CANONICAL scope param, so
+//     it now FILTERS. This test asserts that filtering and exists to fail loudly
+//     if a future change ever silently drops the rename.
+//
+// The test deliberately passes only known fields (role, domain) — no `days:` or
+// other incidental unknown keys — so it stays green regardless of whether the
+// sibling strict-params PR (fix/rpc-disallow-unknown-fields, which turns unknown
+// keys into -32602) has merged. `days` is exercised for the typo path in PR #21's
+// history; here we only need to prove `domain:` is honored.
+func TestRecentObservationsWrongParamNamesAreSilentlyIgnored(t *testing.T) {
+	ts := newTestServer(t)
+	today := time.Now().UTC().Format("2006-01-02")
+	seedObs(t, ts, "personal/observations.md", fmt.Sprintf("- %s [x]: p\n", today))
+	seedObs(t, ts, "work/microsoft/observations.md", fmt.Sprintf("- %s [x]: w\n", today))
+
+	// `domain:` is now the canonical param and scopes the scan.
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 1, Method: "recent_observations",
+		Params: map[string]interface{}{"role": "siona", "domain": "personal"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("rpc (domain): %v", resp.Error.Message)
+	}
+	var scoped recentObsResult
+	json.Unmarshal(resp.Result, &scoped)
+	if len(scoped.Entries) != 1 || scoped.Entries[0].Domain != "personal" {
+		t.Fatalf("domain: should now isolate personal (canonical rename); got %+v", scoped.Entries)
+	}
+	if scoped.ByDomain["personal"] != 1 || len(scoped.ByDomain) != 1 {
+		t.Fatalf("expected only personal in by_domain aggregate after domain scope; got %+v", scoped.ByDomain)
 	}
 }
 

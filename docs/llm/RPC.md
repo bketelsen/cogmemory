@@ -422,7 +422,8 @@ controller-declared observations files, with pre-computed aggregates.
 |---|---|---|---|
 | since | string | no | `YYYY-MM-DD`, RFC3339, Go duration (`168h`), or `"Nd"` (e.g. `7d`, `90d`) — same forms as cluster_check/domain_summary. Inclusive lower bound (`date >= since`). Default: today (UTC) minus 7 days |
 | by_tag | string | no | only entries whose tag list contains this tag (case-sensitive); aggregates reflect the filtered set |
-| by_domain | string | no | restrict to one canonical domain id; unknown id or domain not declaring `observations` → `-32602` |
+| domain | string | no | restrict to one canonical domain id; unknown id or domain not declaring `observations` → `-32602`. (Canonical scope param, consistent with open_actions/cluster_check/domain_summary/entity_audit/l0index.) |
+| by_domain | string | no | **DEPRECATED alias for `domain`, accepted until 2026-07-12.** Same semantics. Emits a server-side deprecation warning. Supplying both `domain` and `by_domain` with different values → `-32602`; identical values are accepted. Migrate callers with `s/by_domain/domain/`. |
 
 **Result** (bare envelope)
 
