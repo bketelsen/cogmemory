@@ -1090,6 +1090,66 @@ func TestRecentObservationsByDomainUnknownErrors(t *testing.T) {
 	}
 }
 
+// Characterization + regression guard for a real-world UX trap.
+//
+// The scoping param is `by_domain` and the window param is `since`. Sibling
+// RPCs (open_actions, cluster_check, domain_summary, entity_audit) instead
+// name their scope param `domain`, so callers reach for `domain:` here out of
+// habit; `days:` is a likewise-plausible-but-wrong guess for the window.
+// Because the handler uses a plain json.Unmarshal (no DisallowUnknownFields),
+// both unknown keys are silently dropped: `days` falls back to the 7-day
+// default window and `domain` leaves by_domain empty, so the call returns
+// every domain. That silent degradation is the bug behind the 2026-06-11
+// "domain filter is a no-op" report — the daemon filter itself works (see
+// TestRecentObservationsByDomainFilter); the call simply used the wrong names.
+//
+// This test pins that behavior so a future silent rename/drop of the real
+// `by_domain` param fails loudly here, and documents the correct contract
+// right next to the trap. Mirrors TestAppendSectionViaRPC, which guards the
+// same "JSON quietly dropped a field" failure mode for append's `section`.
+func TestRecentObservationsWrongParamNamesAreSilentlyIgnored(t *testing.T) {
+	ts := newTestServer(t)
+	// Two domains, both with an entry inside the default 7-day window so the
+	// dropped `days` value can't accidentally hide one of them.
+	today := time.Now().UTC().Format("2006-01-02")
+	seedObs(t, ts, "personal/observations.md", fmt.Sprintf("- %s [x]: p\n", today))
+	seedObs(t, ts, "work/microsoft/observations.md", fmt.Sprintf("- %s [x]: w\n", today))
+
+	// The names from the bug report: `domain` + `days`. Both are unknown
+	// fields and are silently dropped -> no scope filter, default window ->
+	// ALL domains come back. This is the "returns the same as no-domain"
+	// symptom.
+	resp := call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 1, Method: "recent_observations",
+		Params: map[string]interface{}{"role": "siona", "days": 14, "domain": "personal"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("rpc (wrong names): %v", resp.Error.Message)
+	}
+	var ignored recentObsResult
+	json.Unmarshal(resp.Result, &ignored)
+	if len(ignored.Entries) != 2 {
+		t.Fatalf("wrong-name params should be ignored (all domains returned); got %d entries: %+v", len(ignored.Entries), ignored.Entries)
+	}
+	if ignored.ByDomain["personal"] != 1 || ignored.ByDomain["work"] != 1 {
+		t.Fatalf("expected both domains present when `domain:` is ignored; by_domain=%+v", ignored.ByDomain)
+	}
+
+	// The correct param name actually scopes the scan.
+	resp = call(t, ts.socketPath, rpcRequest{
+		JSONRPC: "2.0", ID: 2, Method: "recent_observations",
+		Params: map[string]interface{}{"role": "siona", "by_domain": "personal"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("rpc (by_domain): %v", resp.Error.Message)
+	}
+	var scoped recentObsResult
+	json.Unmarshal(resp.Result, &scoped)
+	if len(scoped.Entries) != 1 || scoped.Entries[0].Domain != "personal" {
+		t.Fatalf("by_domain should isolate personal; got %+v", scoped.Entries)
+	}
+}
+
 func TestRecentObservationsInvalidSinceRejected(t *testing.T) {
 	ts := newTestServer(t)
 	resp := call(t, ts.socketPath, rpcRequest{
