@@ -355,8 +355,19 @@ type recentObservationsParams struct {
 	// ByTag, when set, restricts entries to those whose tag list contains
 	// the given tag (case-sensitive). Aggregates reflect the filtered set.
 	ByTag string `json:"by_tag,omitempty"`
-	// ByDomain, when set, restricts the scan to a single canonical domain id.
-	ByDomain string `json:"by_domain,omitempty"`
+	// Domain, when set, restricts the scan to a single canonical domain id.
+	// This is the canonical scope param, matching the sibling RPCs
+	// (open_actions, cluster_check, domain_summary, entity_audit, l0index).
+	Domain string `json:"domain,omitempty"`
+	// LegacyByDomain is the DEPRECATED alias for Domain. It is accepted for
+	// backward compatibility until 2026-07-12 (~1 month), after which this
+	// field and its handling should be removed. When only this field is set
+	// the handler logs a deprecation warning. When both Domain and
+	// LegacyByDomain are set with different values the call is rejected with
+	// CodeInvalidParams; identical values are accepted. The lone `by_domain`
+	// naming here was the muscle-memory trap behind PR #21 — see
+	// docs/RPC-CONSOLIDATION.md.
+	LegacyByDomain string `json:"by_domain,omitempty"`
 }
 
 func (srv *Server) handleRecentObservations(req Request) Response {
@@ -367,6 +378,20 @@ func (srv *Server) handleRecentObservations(req Request) Response {
 	if p.Role == "" {
 		return errorResponse(req.ID, CodeInvalidParams, "recent_observations: role required")
 	}
+	// Resolve the effective scope domain. `domain` is canonical; `by_domain`
+	// is a deprecated alias kept until 2026-07-12. Reject conflicting values,
+	// warn on the deprecated-only path.
+	if p.Domain != "" && p.LegacyByDomain != "" && p.Domain != p.LegacyByDomain {
+		return errorResponse(req.ID, CodeInvalidParams,
+			"recent_observations: both `domain` and (deprecated) `by_domain` provided with different values")
+	}
+	effDomain := p.Domain
+	if effDomain == "" {
+		effDomain = p.LegacyByDomain
+	}
+	if p.LegacyByDomain != "" && p.Domain == "" {
+		log.Printf("cogmemory: recent_observations warning: `by_domain` is deprecated; use `domain` (alias removed after 2026-07-12)")
+	}
 	_, since, err := resolveSince(p.Since)
 	if err != nil {
 		return errorResponse(req.ID, CodeInvalidParams, "recent_observations: "+err.Error())
@@ -374,8 +399,8 @@ func (srv *Server) handleRecentObservations(req Request) Response {
 
 	var targets []store.ObsTarget
 	if srv.controller != nil {
-		if p.ByDomain != "" {
-			d, err := srv.controller.Get(p.ByDomain)
+		if effDomain != "" {
+			d, err := srv.controller.Get(effDomain)
 			if err != nil {
 				return errorResponse(req.ID, CodeInvalidParams, "recent_observations: "+err.Error())
 			}

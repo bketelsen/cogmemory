@@ -654,7 +654,7 @@ Pass 1 is N keyword greps across the whole tree (N ≈ 3–8). Pass 2 is 3–5 t
 
 **Pass 1 — Locate.** No single RPC covers "grep across all memory files." Three partial substitutes exist; pick by query shape, then fall back to free-text search for the residual:
 
-- *Observation-shaped* (events, dated entries, tag-driven): call `recent_observations(role, since=<wide window>, by_tag?=<extracted tag>, by_domain?=<from session_brief>)`. The returned `by_domain` / `by_tag` aggregates tell you where to focus; the `entries[]` array already carries `{path, line, date, tags, text}` — that is most of Pass 2's payload for free, no extra read needed.
+- *Observation-shaped* (events, dated entries, tag-driven): call `recent_observations(role, since=<wide window>, by_tag?=<extracted tag>, domain?=<from session_brief>)` (the scope param is `domain`; the old `by_domain` spelling is a deprecated alias accepted until 2026-07-12). The returned `by_domain` / `by_tag` aggregates tell you where to focus; the `entries[]` array already carries `{path, line, date, tags, text}` — that is most of Pass 2's payload for free, no extra read needed.
 - *Entity-shaped* (a person, an org, a project): call `entity_audit(role)` once and inspect the returned `name` set across all `entities.md` files. This maps the entity to its canonical home before any read.
 - *Glacier-shaped* ("did we ever…", "back when…"): **no RPC** covers glacier search (see Gaps). Fall back to `cog_read("glacier/index.md")` + a targeted `cog_read` of the matching slab — kept as prose, not collapsed.
 - *Otherwise* (true free text): fall back to `cog_search(query)`. Treat its hits the same way you'd treat the `recent_observations` `entries[]` array — but expect less enrichment (see Gaps).
