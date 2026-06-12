@@ -1,8 +1,6 @@
 package rpc
 
 import (
-	"encoding/json"
-
 	"github.com/bketelsen/cogmemory/domain"
 	"github.com/bketelsen/cogmemory/store"
 )
@@ -28,10 +26,8 @@ type housekeepingScanParams struct {
 // the envelope documented in docs/RPC-CONSOLIDATION.md §2.
 func (srv *Server) handleHousekeepingScan(req Request) Response {
 	var p housekeepingScanParams
-	if req.Params != nil {
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return errorResponse(req.ID, CodeInvalidParams, "housekeeping_scan: invalid params: "+err.Error())
-		}
+	if err := decodeParams(req.Params, &p); err != nil {
+		return errorResponse(req.ID, CodeInvalidParams, "housekeeping_scan: invalid params: "+err.Error())
 	}
 	if p.Role == "" {
 		return errorResponse(req.ID, CodeInvalidParams, "housekeeping_scan: role required")

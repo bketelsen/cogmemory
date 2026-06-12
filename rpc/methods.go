@@ -1,7 +1,6 @@
 package rpc
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -29,7 +28,7 @@ type readParams struct {
 
 func (srv *Server) handleRead(req Request) Response {
 	var p readParams
-	if err := json.Unmarshal(req.Params, &p); err != nil {
+	if err := decodeParams(req.Params, &p); err != nil {
 		return errorResponse(req.ID, CodeInvalidParams, "read: invalid params: "+err.Error())
 	}
 	if p.Path == "" {
@@ -61,7 +60,7 @@ type writeParams struct {
 
 func (srv *Server) handleWrite(req Request) Response {
 	var p writeParams
-	if err := json.Unmarshal(req.Params, &p); err != nil {
+	if err := decodeParams(req.Params, &p); err != nil {
 		return errorResponse(req.ID, CodeInvalidParams, "write: invalid params: "+err.Error())
 	}
 	if p.Path == "" {
@@ -92,7 +91,7 @@ type appendParams struct {
 
 func (srv *Server) handleAppend(req Request) Response {
 	var p appendParams
-	if err := json.Unmarshal(req.Params, &p); err != nil {
+	if err := decodeParams(req.Params, &p); err != nil {
 		return errorResponse(req.ID, CodeInvalidParams, "append: invalid params: "+err.Error())
 	}
 	if p.Path == "" {
@@ -123,7 +122,7 @@ type patchParams struct {
 
 func (srv *Server) handlePatch(req Request) Response {
 	var p patchParams
-	if err := json.Unmarshal(req.Params, &p); err != nil {
+	if err := decodeParams(req.Params, &p); err != nil {
 		return errorResponse(req.ID, CodeInvalidParams, "patch: invalid params: "+err.Error())
 	}
 	if p.Path == "" {
@@ -149,7 +148,7 @@ type outlineParams struct {
 
 func (srv *Server) handleOutline(req Request) Response {
 	var p outlineParams
-	if err := json.Unmarshal(req.Params, &p); err != nil {
+	if err := decodeParams(req.Params, &p); err != nil {
 		return errorResponse(req.ID, CodeInvalidParams, "outline: invalid params: "+err.Error())
 	}
 	if p.Path == "" {
@@ -177,7 +176,7 @@ type moveParams struct {
 
 func (srv *Server) handleMove(req Request) Response {
 	var p moveParams
-	if err := json.Unmarshal(req.Params, &p); err != nil {
+	if err := decodeParams(req.Params, &p); err != nil {
 		return errorResponse(req.ID, CodeInvalidParams, "move: invalid params: "+err.Error())
 	}
 	if p.From == "" {
@@ -206,7 +205,7 @@ type searchParams struct {
 
 func (srv *Server) handleSearch(req Request) Response {
 	var p searchParams
-	if err := json.Unmarshal(req.Params, &p); err != nil {
+	if err := decodeParams(req.Params, &p); err != nil {
 		return errorResponse(req.ID, CodeInvalidParams, "search: invalid params: "+err.Error())
 	}
 	if p.Query == "" {
@@ -235,8 +234,8 @@ type statsParams struct {
 
 func (srv *Server) handleStats(req Request) Response {
 	var p statsParams
-	if req.Params != nil {
-		json.Unmarshal(req.Params, &p) //nolint:errcheck
+	if err := decodeParams(req.Params, &p); err != nil {
+		return errorResponse(req.ID, CodeInvalidParams, "stats: invalid params: "+err.Error())
 	}
 	// Stats is available to any authenticated role
 	stats, err := srv.store.Stats(p.Prefix)
@@ -255,8 +254,8 @@ type l0indexParams struct {
 
 func (srv *Server) handleL0Index(req Request) Response {
 	var p l0indexParams
-	if req.Params != nil {
-		json.Unmarshal(req.Params, &p) //nolint:errcheck
+	if err := decodeParams(req.Params, &p); err != nil {
+		return errorResponse(req.ID, CodeInvalidParams, "l0index: invalid params: "+err.Error())
 	}
 	index, err := srv.store.L0Index(p.Domain)
 	if err != nil {
@@ -275,8 +274,8 @@ type listParams struct {
 
 func (srv *Server) handleList(req Request) Response {
 	var p listParams
-	if req.Params != nil {
-		json.Unmarshal(req.Params, &p) //nolint:errcheck
+	if err := decodeParams(req.Params, &p); err != nil {
+		return errorResponse(req.ID, CodeInvalidParams, "list: invalid params: "+err.Error())
 	}
 	paths, err := srv.store.List()
 	if err != nil {
@@ -298,10 +297,8 @@ type openActionsParams struct {
 
 func (srv *Server) handleOpenActions(req Request) Response {
 	var p openActionsParams
-	if req.Params != nil {
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return errorResponse(req.ID, CodeInvalidParams, "open_actions: invalid params: "+err.Error())
-		}
+	if err := decodeParams(req.Params, &p); err != nil {
+		return errorResponse(req.ID, CodeInvalidParams, "open_actions: invalid params: "+err.Error())
 	}
 	if p.Role == "" {
 		return errorResponse(req.ID, CodeInvalidParams, "open_actions: role required")
@@ -364,10 +361,8 @@ type recentObservationsParams struct {
 
 func (srv *Server) handleRecentObservations(req Request) Response {
 	var p recentObservationsParams
-	if req.Params != nil {
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return errorResponse(req.ID, CodeInvalidParams, "recent_observations: invalid params: "+err.Error())
-		}
+	if err := decodeParams(req.Params, &p); err != nil {
+		return errorResponse(req.ID, CodeInvalidParams, "recent_observations: invalid params: "+err.Error())
 	}
 	if p.Role == "" {
 		return errorResponse(req.ID, CodeInvalidParams, "recent_observations: role required")
@@ -426,10 +421,8 @@ type clusterCheckParams struct {
 
 func (srv *Server) handleClusterCheck(req Request) Response {
 	var p clusterCheckParams
-	if req.Params != nil {
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return errorResponse(req.ID, CodeInvalidParams, "cluster_check: invalid params: "+err.Error())
-		}
+	if err := decodeParams(req.Params, &p); err != nil {
+		return errorResponse(req.ID, CodeInvalidParams, "cluster_check: invalid params: "+err.Error())
 	}
 	if p.Role == "" {
 		return errorResponse(req.ID, CodeInvalidParams, "cluster_check: role required")
@@ -516,10 +509,8 @@ type scenarioCheckParams struct {
 // how many days?" RBAC is enforced per-file on read against cog-meta/scenarios/.
 func (srv *Server) handleScenarioCheck(req Request) Response {
 	var p scenarioCheckParams
-	if req.Params != nil {
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return errorResponse(req.ID, CodeInvalidParams, "scenario_check: invalid params: "+err.Error())
-		}
+	if err := decodeParams(req.Params, &p); err != nil {
+		return errorResponse(req.ID, CodeInvalidParams, "scenario_check: invalid params: "+err.Error())
 	}
 	if p.Role == "" {
 		return errorResponse(req.ID, CodeInvalidParams, "scenario_check: role required")
@@ -548,10 +539,8 @@ type domainsListParams struct {
 
 func (srv *Server) handleDomainsList(req Request) Response {
 	var p domainsListParams
-	if req.Params != nil {
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return errorResponse(req.ID, CodeInvalidParams, "domains.list: invalid params: "+err.Error())
-		}
+	if err := decodeParams(req.Params, &p); err != nil {
+		return errorResponse(req.ID, CodeInvalidParams, "domains.list: invalid params: "+err.Error())
 	}
 	if srv.controller == nil {
 		return errorResponse(req.ID, CodeStoreError, "domains.list: controller unavailable")
@@ -576,10 +565,8 @@ type domainsGetParams struct {
 
 func (srv *Server) handleDomainsGet(req Request) Response {
 	var p domainsGetParams
-	if req.Params != nil {
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return errorResponse(req.ID, CodeInvalidParams, "domains.get: invalid params: "+err.Error())
-		}
+	if err := decodeParams(req.Params, &p); err != nil {
+		return errorResponse(req.ID, CodeInvalidParams, "domains.get: invalid params: "+err.Error())
 	}
 	if p.ID == "" {
 		return errorResponse(req.ID, CodeInvalidParams, "domains.get: id is required")
@@ -608,10 +595,8 @@ type glacierIndexParams struct {
 
 func (srv *Server) handleGlacierIndexCompute(req Request) Response {
 	var p glacierIndexParams
-	if req.Params != nil {
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return errorResponse(req.ID, CodeInvalidParams, "glacier_index_compute: invalid params: "+err.Error())
-		}
+	if err := decodeParams(req.Params, &p); err != nil {
+		return errorResponse(req.ID, CodeInvalidParams, "glacier_index_compute: invalid params: "+err.Error())
 	}
 	if p.Role == "" {
 		return errorResponse(req.ID, CodeInvalidParams, "glacier_index_compute: role required")
@@ -640,10 +625,8 @@ type wikiIndexParams struct {
 
 func (srv *Server) handleWikiIndexCompute(req Request) Response {
 	var p wikiIndexParams
-	if req.Params != nil {
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return errorResponse(req.ID, CodeInvalidParams, "wiki_index_compute: invalid params: "+err.Error())
-		}
+	if err := decodeParams(req.Params, &p); err != nil {
+		return errorResponse(req.ID, CodeInvalidParams, "wiki_index_compute: invalid params: "+err.Error())
 	}
 	if p.Role == "" {
 		return errorResponse(req.ID, CodeInvalidParams, "wiki_index_compute: role required")
@@ -689,10 +672,8 @@ type DomainSummaryResult struct {
 
 func (srv *Server) handleDomainSummary(req Request) Response {
 	var p domainSummaryParams
-	if req.Params != nil {
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return errorResponse(req.ID, CodeInvalidParams, "domain_summary: invalid params: "+err.Error())
-		}
+	if err := decodeParams(req.Params, &p); err != nil {
+		return errorResponse(req.ID, CodeInvalidParams, "domain_summary: invalid params: "+err.Error())
 	}
 	if p.Role == "" {
 		return errorResponse(req.ID, CodeInvalidParams, "domain_summary: role required")
@@ -819,10 +800,8 @@ type entityAuditParams struct {
 
 func (srv *Server) handleEntityAudit(req Request) Response {
 	var p entityAuditParams
-	if req.Params != nil {
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return errorResponse(req.ID, CodeInvalidParams, "entity_audit: invalid params: "+err.Error())
-		}
+	if err := decodeParams(req.Params, &p); err != nil {
+		return errorResponse(req.ID, CodeInvalidParams, "entity_audit: invalid params: "+err.Error())
 	}
 	if p.Role == "" {
 		return errorResponse(req.ID, CodeInvalidParams, "entity_audit: role required")
@@ -870,10 +849,8 @@ type linkIndexComputeParams struct {
 
 func (srv *Server) handleLinkIndexCompute(req Request) Response {
 	var p linkIndexComputeParams
-	if req.Params != nil {
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return errorResponse(req.ID, CodeInvalidParams, "link_index_compute: invalid params: "+err.Error())
-		}
+	if err := decodeParams(req.Params, &p); err != nil {
+		return errorResponse(req.ID, CodeInvalidParams, "link_index_compute: invalid params: "+err.Error())
 	}
 	if p.Role == "" {
 		return errorResponse(req.ID, CodeInvalidParams, "link_index_compute: role required")
@@ -896,10 +873,8 @@ type linkAuditParams struct {
 
 func (srv *Server) handleLinkAudit(req Request) Response {
 	var p linkAuditParams
-	if req.Params != nil {
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return errorResponse(req.ID, CodeInvalidParams, "link_audit: invalid params: "+err.Error())
-		}
+	if err := decodeParams(req.Params, &p); err != nil {
+		return errorResponse(req.ID, CodeInvalidParams, "link_audit: invalid params: "+err.Error())
 	}
 	if p.Role == "" {
 		return errorResponse(req.ID, CodeInvalidParams, "link_audit: role required")
@@ -935,7 +910,7 @@ type gitParams struct {
 
 func (srv *Server) handleGit(req Request) Response {
 	var p gitParams
-	if err := json.Unmarshal(req.Params, &p); err != nil {
+	if err := decodeParams(req.Params, &p); err != nil {
 		return errorResponse(req.ID, CodeInvalidParams, "git: invalid params: "+err.Error())
 	}
 	if p.Op == "" {
