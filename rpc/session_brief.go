@@ -1,8 +1,6 @@
 package rpc
 
 import (
-	"encoding/json"
-
 	"github.com/bketelsen/cogmemory/domain"
 	"github.com/bketelsen/cogmemory/store"
 )
@@ -42,10 +40,8 @@ type sessionBriefDomain struct {
 
 func (srv *Server) handleSessionBrief(req Request) Response {
 	var p sessionBriefParams
-	if req.Params != nil {
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return errorResponse(req.ID, CodeInvalidParams, "session_brief: invalid params: "+err.Error())
-		}
+	if err := decodeParams(req.Params, &p); err != nil {
+		return errorResponse(req.ID, CodeInvalidParams, "session_brief: invalid params: "+err.Error())
 	}
 	if p.Role == "" {
 		return errorResponse(req.ID, CodeInvalidParams, "session_brief: role required")
